@@ -1329,6 +1329,11 @@ pub struct AgentView {
     /// The cycle logic uses `plan_mode_pending.unwrap_or(plan_mode_active)`
     /// so rapid Shift+Tab presses advance correctly without waiting for ACP.
     pub(crate) plan_mode_pending: Option<bool>,
+    /// Rivo agent mode ring (Normal → Plan → Ask → Debug → Multitask → Normal).
+    /// Shift+Tab cycles this; YOLO stays orthogonal (Ctrl+O). Fase 3 stores it
+    /// without yet gating tools — kept in sync with `plan_mode_active` for
+    /// backwards-compat. Defaults to `Normal`.
+    pub agent_mode: crate::app::agent_mode::AgentMode,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).

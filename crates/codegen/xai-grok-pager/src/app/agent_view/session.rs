@@ -275,6 +275,7 @@ impl AgentView {
             question_scroll_region: None,
             plan_mode_active: false,
             plan_mode_pending: None,
+            agent_mode: crate::app::agent_mode::AgentMode::default(),
             deferred_session_mode: None,
             pending_extensions_fetch: false,
             in_dashboard_overlay: false,

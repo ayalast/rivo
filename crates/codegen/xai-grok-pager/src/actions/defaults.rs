@@ -518,7 +518,7 @@ pub(super) fn default_actions(
         ActionDef {
             id: ActionId::CycleMode,
             label: "mode",
-            description: "Cycle mode (Normal / Plan / Always-approve)",
+            description: "Cycle mode (Normal / Plan / Ask / Debug / Multitask)",
             // All Shift+Tab encodings — see `input::key::shift_tab_keys()`.
             default_key: crate::input::key::shift_tab_keys()[0],
             alt_keys: crate::input::key::shift_tab_keys()[1..].to_vec(),
@@ -528,7 +528,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("Shift+Tab"),
             requires_confirmation: false,
             long_help: Some(
-                "Steps the session mode: Normal -> Plan -> Always-Approve -> Normal.\nPlan keeps the agent planning first and writes no files; Always-Approve runs every tool call without asking.\nCtrl+O toggles auto-approve directly.",
+                "Steps the rivo agent mode: Normal -> Plan -> Ask -> Debug -> Multitask -> Normal.\nPlan keeps the agent planning first and writes no files; Ask is read-only; Debug hypothesizes and instruments; Multitask orchestrates subagents.\nAlways-Approve (YOLO) is orthogonal — use Ctrl+O / --yolo, not Shift+Tab.",
             ),
         },
         // ── Panes (agent-level — toggle side panes) ─────────────────
@@ -979,7 +979,7 @@ pub(super) fn default_actions(
         ActionDef {
             id: ActionId::DashboardCycleMode,
             label: "mode",
-            description: "Cycle dispatch mode",
+            description: "Cycle dispatch mode (Normal / Plan / Ask / Debug / Multitask)",
             // All Shift+Tab encodings — see `input::key::shift_tab_keys()`.
             // Registry `matches` is exact-modifier, so the SHIFT-bearing
             // forms must be alts.
@@ -991,7 +991,7 @@ pub(super) fn default_actions(
             hint_key_display: Some("Shift+Tab"),
             requires_confirmation: false,
             long_help: Some(
-                "Cycles the dispatch mode for agents you launch from the dashboard: Normal, Plan, then Always-Approve.\nPlan has new agents plan before changing files; Always-Approve runs their tools without prompting.\nMirrors the in-session Shift+Tab cycle, applied to new dispatches.",
+                "Cycles the dispatch mode for agents you launch from the dashboard: Normal -> Plan -> Ask -> Debug -> Multitask -> Normal.\nMirrors the in-session Shift+Tab cycle, applied to new dispatches.",
             ),
         },
         ActionDef {
