@@ -121,8 +121,9 @@ fn is_critical(a: &xai_grok_announcements::RemoteAnnouncement) -> bool {
     a.severity.as_deref() == Some("critical")
 }
 
-fn is_promo(a: &xai_grok_announcements::RemoteAnnouncement) -> bool {
-    a.severity.as_deref() == Some("promo")
+fn is_promo(_a: &xai_grok_announcements::RemoteAnnouncement) -> bool {
+    // rivo: promo/upgrade banners are suppressed — only critical (real errors) are shown.
+    false
 }
 
 /// One definition of "live critical" (visible message + critical + not expired)
