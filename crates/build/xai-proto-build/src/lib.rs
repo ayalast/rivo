@@ -125,7 +125,20 @@ impl XaiProtoBuilder {
             );
         }
 
+        // rivo: Windows — skip Unix-only /dev/stdout dependency tracking.
+        // Emit rerun-if-changed for the proto files directly.
+        #[cfg(windows)]
+        {
+            for proto in protos.into_iter() {
+                println!("cargo:rerun-if-changed={}", proto.display());
+            }
+            for include in includes.into_iter() {
+                println!("cargo:rerun-if-changed={}", include.display());
+            }
+            return Ok(());
+        }
         // Can only process one input file when using --dependency_out=FILE.
+        #[cfg(not(windows))]
         for proto in protos {
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
             command
@@ -183,6 +196,7 @@ impl XaiProtoBuilder {
             }
         }
 
+        #[cfg(not(windows))]
         Ok(())
     }
 
