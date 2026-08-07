@@ -52,4 +52,5 @@ pub mod todo_pane;
 pub mod turn_status;
 pub mod tutorial;
 pub mod welcome;
+pub mod window_manager;
 pub mod workflows;

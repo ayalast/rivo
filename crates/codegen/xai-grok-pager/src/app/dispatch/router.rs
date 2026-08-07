@@ -1025,6 +1025,29 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
         Action::SendBtw(question) => dispatch_send_btw(app, question),
+        Action::CreateSideChat { parent_id, prompt } => {
+            let pid = if parent_id.is_empty() {
+                format!("{:?}", app.active_view)
+            } else {
+                parent_id
+            };
+            let chat = app.side_chats.create_side(pid, Some(prompt));
+            let id = chat.id.clone();
+            // Best-effort persist (ignore errors in scaffold)
+            let _ = crate::app::side_chat::persist::save_store(&app.side_chats);
+            app.show_toast(&format!("Side chats coming soon (scaffold) — created {id}"));
+            vec![]
+        }
+        Action::ListSideChats => {
+            let n = app.side_chats.len();
+            let active = app
+                .side_chats
+                .active()
+                .map(|c| c.id.clone())
+                .unwrap_or_else(|| "none".to_string());
+            app.show_toast(&format!("Side chats: {n} (active: {active}) — scaffold"));
+            vec![]
+        }
         Action::SendRecap { auto } => dispatch_send_recap(app, auto),
         Action::SetCodingDataSharing { opted_in } => set_coding_data_sharing(
             app,

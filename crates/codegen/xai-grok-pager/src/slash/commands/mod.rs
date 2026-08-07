@@ -58,6 +58,7 @@ pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
+pub mod side;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
@@ -123,6 +124,8 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(mcps::McpsCommand),
         Arc::new(workflows::WorkflowsCommand),
         Arc::new(btw::BtwCommand),
+        Arc::new(side::SideCommand),
+        Arc::new(side::SidesCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
         Arc::new(voice::VoiceCommand),

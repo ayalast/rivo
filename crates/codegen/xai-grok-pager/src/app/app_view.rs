@@ -1216,6 +1216,15 @@ pub struct AppView {
     /// combinations are unrepresentable; production mutates it only through the
     /// `AppView::voice_*` transition methods.
     pub voice_state: VoiceState,
+    /// Durable side chats (Cursor-faithful). Scaffold: state only, no tiling.
+    /// Gated behind `tiling_enabled` flag on WindowManager.
+    pub side_chats: crate::app::side_chat::SideChatStore,
+    /// Tiled window manager (Cursor-faithful). Scaffold behind flag — existing
+    /// single-column layout unchanged when `tiling_enabled == false`.
+    pub window_manager: crate::views::window_manager::WindowManager,
+    /// Whether tiled layout is enabled (feature flag). `false` = single-column
+    /// (existing behavior). Do NOT flip to true until tiled draw is wired and QA'd.
+    pub tiling_enabled: bool,
 }
 /// Reshow window elapsed? None/0 = never. Unparseable ack fails open (show).
 fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
@@ -1620,6 +1629,9 @@ impl AppView {
             voice_auth: None,
             voice_cmd_tx: None,
             voice_state: VoiceState::Idle,
+            side_chats: crate::app::side_chat::SideChatStore::new(),
+            window_manager: crate::views::window_manager::WindowManager::new(),
+            tiling_enabled: false,
         }
     }
     /// Seed `deferred_model_switch` from CLI `-m`. The CLI effort token is

@@ -16,6 +16,7 @@ pub mod agent_view;
 pub mod app_view;
 pub mod bundle;
 pub mod cli;
+pub mod side_chat;
 pub use crate::link_opener;
 /// Off-thread full-file syntax highlight upgrade for edit diffs.
 pub mod edit_highlight_worker;
