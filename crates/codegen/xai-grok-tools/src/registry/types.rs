@@ -308,6 +308,8 @@ pub struct SessionContext {
     /// Defaults to [`crate::reminders::DEFAULT_REMINDER_TAG`] (hyphen).
     /// Hosts that expect a different tag name may override this.
     pub system_reminder_tag: &'static str,
+    /// When true, mutating tools (Edit/Execute etc.) are hidden from the model.
+    pub ask_mode: bool,
 }
 /// Default metadata for dynamically registered tools (e.g., MCP tools)
 /// that don't implement `ToolMetadata`.
@@ -1117,9 +1119,36 @@ impl ToolRegistryBuilder {
             .join("resources_state.json");
         let persistence = Arc::new(ResourcesPersistence::new(resources_state_path));
         persistence.load(&mut resources);
+        // Ask mode: filter out mutating tools (Edit/Execute etc.) — keep is_read_only
+        // duality intact by simply not advertising them. Unknown/mcp kinds (None) are preserved.
+        let ask_mode = ctx.ask_mode;
+        let filtered_config_tools: Vec<ToolConfig> = if ask_mode {
+            config
+                .tools
+                .iter()
+                .filter(|tc| {
+                    if let Some(entry) = self.tools.get(tc.id.as_str()) {
+                        entry.metadata.is_read_only()
+                            || tc.kind.is_none()
+                            || matches!(tc.kind, Some(crate::types::tool::ToolKind::Other))
+                            || entry.kind.is_read_only()
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect()
+        } else {
+            config.tools.clone()
+        };
+        let filtered_config = ToolServerConfig {
+            tools: filtered_config_tools,
+            behavior_preset: config.behavior_preset.clone(),
+        };
+        let config = &filtered_config;
         let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
         let local_registry = self.shared_local_registry.take().unwrap_or_default();
-        for tool_config in &config.tools {
+        for tool_config in config.tools.iter() {
             let entry = self.tools.remove(&tool_config.id).unwrap();
             (entry.register_in_local)(&local_registry);
             let contract_version = crate::versions::resolve_version(

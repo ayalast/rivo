@@ -30,6 +30,14 @@ impl SessionMode {
     pub fn is_plan(&self) -> bool {
         matches!(self, Self::Plan)
     }
+
+    pub fn is_ask(&self) -> bool {
+        matches!(self, Self::Ask)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, Self::Ask | Self::Plan)
+    }
 }
 
 #[cfg(test)]
@@ -56,5 +64,19 @@ mod tests {
         assert!(SessionMode::Plan.is_plan());
         assert!(!SessionMode::Default.is_plan());
         assert!(!SessionMode::Ask.is_plan());
+    }
+
+    #[test]
+    fn is_ask_only_for_ask_variant() {
+        assert!(SessionMode::Ask.is_ask());
+        assert!(!SessionMode::Default.is_ask());
+        assert!(!SessionMode::Plan.is_ask());
+    }
+
+    #[test]
+    fn is_read_only_for_ask_and_plan() {
+        assert!(SessionMode::Ask.is_read_only());
+        assert!(SessionMode::Plan.is_read_only());
+        assert!(!SessionMode::Default.is_read_only());
     }
 }

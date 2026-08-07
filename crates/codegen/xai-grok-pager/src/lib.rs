@@ -1,4 +1,4 @@
-//! xai-grok-pager — Grok Build TUI.
+//! rivo — fork of Grok Build 1.0 (xai-grok-pager) without upgrade nags.
 //!
 //! A clean-room implementation built on the v3 pager rendering engine.
 

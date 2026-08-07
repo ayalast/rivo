@@ -402,6 +402,7 @@ pub struct LeaderArgs {
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "rivo",
+    bin_name = "rivo",
     version = env!("VERSION_WITH_COMMIT"),
     about = "rivo — fork of Grok Build 1.0 without upgrade nags",
     disable_version_flag = true,
@@ -828,8 +829,8 @@ impl PagerArgs {
             .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
+            .filter(|n| *n == "grok" || *n == "rivo" || *n == "agent")
+            .unwrap_or("rivo")
             .to_owned();
         Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
     }

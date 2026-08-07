@@ -1618,10 +1618,12 @@ pub enum Effect {
     },
     /// Persist the permission mode to config.toml and notify the agent
     /// via ACP. See [`PermissionModePersist`] for rollback semantics.
+    /// `session_ids` fans out `x.ai/yolo_mode_changed` per live session when Yolo is global.
     PersistPermissionMode {
         /// One of `"ask"`, `"always-approve"`, or `"default"`.
         canonical: &'static str,
         session_id: Option<acp::SessionId>,
+        session_ids: Vec<acp::SessionId>,
         persist: PermissionModePersist,
     },
     /// Persist a typed setting to `~/.grok/config.toml`. On failure,

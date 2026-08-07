@@ -272,6 +272,8 @@ pub(super) fn sync_active_auto_flag(app: &mut AppView) {
 
 /// State-only `permission_mode` (YOLO) mutation; also called from rollback.
 /// Flips to ON are refused while the pin is set.
+/// Yolo is global: toggles `yolo_mode` on **all** live agents, drains every
+/// permission queue and broadcasts per-session `x.ai/yolo_mode_changed`.
 pub(super) fn set_yolo_mode_inner(app: &mut AppView, new: bool) {
     if yolo_enable_blocked(app, new).is_some() {
         tracing::warn!("always-approve enable blocked by managed policy");
@@ -284,49 +286,42 @@ pub(super) fn set_yolo_mode_inner(app: &mut AppView, new: bool) {
     // Write-only mirror — see fn doc-comment.
     app.current_ui.permission_mode = Some(if new { "always-approve" } else { "ask" }.to_string());
 
-    let ActiveView::Agent(id) = app.active_view else {
-        return;
+    // Capture active agent's previous state for telemetry before mutating.
+    let previous_state = match app.active_view {
+        ActiveView::Agent(id) => app.agents.get(&id).map(|a| a.session.is_yolo()).unwrap_or(false),
+        _ => false,
     };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return;
-    };
 
-    let previous_state = agent.session.is_yolo();
-
-    // Drain ordering invariant: flag flip BEFORE the drain (see fn
-    // doc-comment). Do NOT reorder these without re-reading the
-    // contract.
-    agent.session.yolo_mode = new;
-
-    if new {
-        // YOLO ON: auto-approve all queued permissions. Drain runs
-        // even on idempotent re-dispatch. Prefers `AllowOnce`; falls
-        // back to `Cancelled` (never `AllowAlways`).
-        agent.last_permission_click = None;
-        for perm in agent.permission_queue.drain(..) {
-            if let Some(allow) = perm
-                .options
-                .iter()
-                .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
-            {
-                perm.request
-                    .response_tx
-                    .send(Ok(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Selected(
-                            acp::SelectedPermissionOutcome::new(allow.option_id.clone()),
-                        ),
-                    )))
-                    .ok();
-            } else {
-                perm.request
-                    .response_tx
-                    .send(Ok(acp::RequestPermissionResponse::new(
-                        acp::RequestPermissionOutcome::Cancelled,
-                    )))
-                    .ok();
+    // Global: flip yolo_mode on every live agent and drain all queues.
+    for agent in app.agents.values_mut() {
+        agent.session.yolo_mode = new;
+        if new {
+            agent.last_permission_click = None;
+            for perm in agent.permission_queue.drain(..) {
+                if let Some(allow) = perm
+                    .options
+                    .iter()
+                    .find(|o| o.kind == acp::PermissionOptionKind::AllowOnce)
+                {
+                    perm.request
+                        .response_tx
+                        .send(Ok(acp::RequestPermissionResponse::new(
+                            acp::RequestPermissionOutcome::Selected(
+                                acp::SelectedPermissionOutcome::new(allow.option_id.clone()),
+                            ),
+                        )))
+                        .ok();
+                } else {
+                    perm.request
+                        .response_tx
+                        .send(Ok(acp::RequestPermissionResponse::new(
+                            acp::RequestPermissionOutcome::Cancelled,
+                        )))
+                        .ok();
+                }
             }
+            super::permissions::restore_permission_stashes(agent);
         }
-        super::permissions::restore_permission_stashes(agent);
     }
 
     // Telemetry + tracing guarded on real state change only.
@@ -377,6 +372,12 @@ pub(super) fn set_yolo_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
         })
         .unwrap_or((false, None, false));
     let prev_canonical = capture_prev_permission_canonical(app, prev_yolo);
+    // Collect all live session_ids for global Yolo broadcast (fan-out).
+    let all_session_ids: Vec<acp::SessionId> = app
+        .agents
+        .values()
+        .filter_map(|a| a.session.session_id.clone())
+        .collect();
 
     set_yolo_mode_inner(app, new);
 
@@ -401,6 +402,7 @@ pub(super) fn set_yolo_mode(app: &mut AppView, new: bool) -> Vec<Effect> {
     vec![Effect::PersistPermissionMode {
         canonical,
         session_id,
+        session_ids: all_session_ids,
         persist: crate::app::actions::PermissionModePersist::WithRollback(prev_canonical),
     }]
 }
@@ -469,9 +471,16 @@ pub(super) fn set_permission_mode(
         app.show_toast(&permission_mode_toast(kind));
     }
 
+    // Global broadcast: collect all live session_ids (settings modal is global)
+    let all_session_ids: Vec<acp::SessionId> = app
+        .agents
+        .values()
+        .filter_map(|a| a.session.session_id.clone())
+        .collect();
     vec![Effect::PersistPermissionMode {
         canonical: kind.as_canonical(),
         session_id,
+        session_ids: all_session_ids,
         persist: crate::app::actions::PermissionModePersist::WithRollback(prev_canonical),
     }]
 }
@@ -587,9 +596,16 @@ fn collapse_to_ask_for_nudge_jump(app: &mut AppView) -> Option<Vec<Effect>> {
     app.current_ui.permission_mode = Some("ask".into());
     sync_active_auto_flag(app);
     tracing::info!("Mode cycle: collapse to ask for plan nudge jump");
+    // Fan-out to all live sessions for global Yolo consistency (BestEffort)
+    let session_ids: Vec<acp::SessionId> = app
+        .agents
+        .values()
+        .filter_map(|a| a.session.session_id.clone())
+        .collect();
     Some(vec![Effect::PersistPermissionMode {
         canonical: "ask",
         session_id: Some(session_id),
+        session_ids: session_ids,
         persist: crate::app::actions::PermissionModePersist::BestEffort,
     }])
 }

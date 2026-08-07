@@ -2010,13 +2010,14 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::PersistPermissionMode { canonical, session_id, persist } => {
+        Effect::PersistPermissionMode { canonical, session_id, session_ids, persist } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(
-                    persist_permission_mode_and_notify(
+                    helpers::persist_permission_mode_and_notify_multi(
                         canonical,
                         session_id,
+                        session_ids,
                         persist,
                         tx,
                     ),

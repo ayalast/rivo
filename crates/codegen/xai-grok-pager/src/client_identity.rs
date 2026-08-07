@@ -1,4 +1,5 @@
 pub const PAGER_CLIENT_TYPE: &str = "grok-pager";
+pub const RIVO_PAGER_CLIENT_TYPE: &str = "rivo";
 pub const HEADLESS_CLIENT_TYPE: &str = "grok-shell";
 
 pub const PAGER_CLIENT_VERSION: &str = xai_grok_version::VERSION;

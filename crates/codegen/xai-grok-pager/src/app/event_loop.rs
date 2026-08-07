@@ -3796,6 +3796,10 @@ pub(crate) fn session_flags_for_effects(
 ) -> effects::SessionFlags {
     effects::SessionFlags {
         plan_mode: app.plan_mode,
+        ask_mode: app
+            .agents
+            .values()
+            .any(|a| a.agent_mode == crate::app::agent_mode::AgentMode::Ask),
         subagents: app.subagents,
         ask_user: app.ask_user,
         restore_code: take_load_restore_code(app, effs),

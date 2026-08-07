@@ -2268,7 +2268,7 @@ mod tests {
     #[test]
     fn cli_command_name_is_grok() {
         use clap::CommandFactory;
-        assert_eq!(PagerArgs::command().get_name(), "grok");
+        assert_eq!(PagerArgs::command().get_name(), "rivo");
     }
     #[test]
     fn cli_help_output_header() {
@@ -2278,9 +2278,9 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "Grok Build TUI",
+                "rivo — fork of Grok Build 1.0 without upgrade nags",
                 "",
-                "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
+                "Usage: rivo [OPTIONS] [PROMPT] [COMMAND]",
                 "",
                 "Arguments:",
             ]

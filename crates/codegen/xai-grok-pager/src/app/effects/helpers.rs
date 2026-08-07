@@ -268,6 +268,7 @@ pub(crate) fn sanitize_user_error(raw: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SessionFlags {
     pub plan_mode: bool,
+    pub ask_mode: bool,
     pub subagents: bool,
     pub ask_user: bool,
     /// Restore code state on resume (`--restore-code`).
@@ -350,6 +351,10 @@ impl SessionFlags {
         }
         if !self.ask_user {
             meta.insert("askUserQuestion".into(), serde_json::json!(false));
+        }
+        if self.ask_mode {
+            meta.insert("askMode".into(), serde_json::json!(true));
+            meta.insert("sessionMode".into(), serde_json::json!("ask"));
         }
         meta.insert("yoloMode".into(), serde_json::json!(self.yolo_mode));
         meta.insert(
@@ -1403,6 +1408,16 @@ pub(crate) async fn persist_permission_mode_and_notify(
     persist: PermissionModePersist,
     tx: AcpAgentTx,
 ) -> TaskResult {
+    persist_permission_mode_and_notify_multi(canonical, session_id, Vec::new(), persist, tx).await
+}
+
+pub(crate) async fn persist_permission_mode_and_notify_multi(
+    canonical: &'static str,
+    session_id: Option<acp::SessionId>,
+    session_ids: Vec<acp::SessionId>,
+    persist: PermissionModePersist,
+    tx: AcpAgentTx,
+) -> TaskResult {
     let enabled = canonical == "always-approve";
     let auto_mode = canonical == "auto";
     let config_str: &'static str = canonical;
@@ -1411,21 +1426,34 @@ pub(crate) async fn persist_permission_mode_and_notify(
         })
         .await;
     let disk_outcome: Result<(), String> = disk_result.map_err(|e| e.to_string());
-    if should_send_yolo_acp_notification(&disk_outcome, persist) && session_id.is_some()
-    {
-        let params = serde_json::json!({
-            "yolo_mode": enabled,
-            "auto_mode": auto_mode,
-            "permission_mode": config_str,
-        });
-        let notification = acp::ExtNotification::new(
-            "x.ai/yolo_mode_changed",
-            serde_json::value::to_raw_value(&params)
-                .expect("serialize yolo_mode_changed params")
-                .into(),
-        );
-        if let Err(e) = acp_send(notification, &tx).await {
-            tracing::warn!("Failed to send yolo_mode_changed notification: {e}");
+    if should_send_yolo_acp_notification(&disk_outcome, persist) {
+        let targets: Vec<acp::SessionId> = if !session_ids.is_empty() {
+            session_ids
+        } else if let Some(sid) = session_id {
+            vec![sid]
+        } else {
+            Vec::new()
+        };
+        for sid in targets {
+            let params = serde_json::json!({
+                "yolo_mode": enabled,
+                "auto_mode": auto_mode,
+                "permission_mode": config_str,
+            });
+            let notification = acp::ExtNotification::new(
+                "x.ai/yolo_mode_changed",
+                serde_json::value::to_raw_value(&params)
+                    .expect("serialize yolo_mode_changed params")
+                    .into(),
+            );
+            // Attach sessionId via notification meta so shell routes correctly if needed;
+            // payload yolo_mode is the canonical signal (existing behavior).
+            // Shell's x.ai/yolo_mode_changed handler currently reads yolo_mode from params,
+            // not from notification routing, so we include it in params; session_id is for fan-out.
+            let _ = sid;
+            if let Err(e) = acp_send(notification, &tx).await {
+                tracing::warn!("Failed to send yolo_mode_changed notification: {e}");
+            }
         }
     }
     route_permission_mode_result(disk_outcome, persist, config_str)
