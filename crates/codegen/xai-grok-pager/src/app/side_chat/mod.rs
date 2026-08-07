@@ -95,6 +95,18 @@ impl SideChat {
         self.last_active = Utc::now();
         self.turn_count = self.turn_count.saturating_add(1);
     }
+
+    /// Append a follow-up message to transcript, bump turn, and toast-ready.
+    /// Returns the new `turn_count`.
+    pub fn append_message(&mut self, text: impl Into<String>) -> usize {
+        let text = text.into();
+        if !text.trim().is_empty() {
+            self.transcript
+                .push(acp::ContentBlock::Text(acp::TextContent::new(text)));
+        }
+        self.touch();
+        self.turn_count
+    }
 }
 
 /// Store for all side chats scoped to the pager process.

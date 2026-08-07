@@ -1,9 +1,9 @@
-//! `/side` — open a durable side chat (Cursor-faithful scaffold).
+//! `/side` — durable side chats (Cursor-faithful).
 //!
-//! Scaffold behind flag: for now creates a side chat via `AppView::side_chats`
-//! and shows a toast "Side chats coming soon (scaffold)". Keeps existing `/btw`
-//! (`BtwCommand`) working — `/btw` still fires the transient panel. `/side` is
-//! the new durable sibling; future consolidation will alias `/btw` → `/side`.
+//! `/side` creates a `SideChat` via `Action::CreateSideChat` (parent_id +
+//! prompt) and `Action::ListSideChats` / switch / close + transcript
+//! follow-ups. Wired to `WindowManager` when `tiling_enabled` (docked right
+//! 65|35) or as overlay when not. Also honors `btw` alias later.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -11,10 +11,8 @@ use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 /// `/side [question]` — open/create a durable side chat.
 ///
 /// When `args` is non-empty it is treated as the initial question.
-/// No session yet — scaffold just toasts; real send will route via
-/// `Action::CreateSideChat { parent_id, prompt }` through dispatch.
-///
-/// Keeps `/btw` working: `BtwCommand` still owns `/btw`.
+/// `/side` bare opens a chat empty; `/side <question>` sends initial.
+/// Also supports subcommands `switch`, `close`, `send` for TUI wiring.
 pub struct SideCommand;
 
 impl SlashCommand for SideCommand {
@@ -23,17 +21,15 @@ impl SlashCommand for SideCommand {
     }
 
     fn aliases(&self) -> &[&str] {
-        // Scaffold keeps `/btw` owned by `BtwCommand` to avoid alias collision.
-        // Future: alias `["btw"]` once the transient panel is migrated.
         &[]
     }
 
     fn description(&self) -> &str {
-        "Open a durable side chat (Cursor faithful; scaffold)"
+        "Open a durable side chat — /side list/switch/close"
     }
 
     fn usage(&self) -> &str {
-        "/side [question]"
+        "/side [question]|switch <id>|close <id>|list"
     }
 
     fn takes_args(&self) -> bool {
@@ -45,7 +41,7 @@ impl SlashCommand for SideCommand {
     }
 
     fn arg_placeholder(&self) -> Option<&str> {
-        Some("[question]")
+        Some("[question]|[switch|close] <id>")
     }
 
     fn session_scoped(&self) -> bool {
@@ -53,24 +49,42 @@ impl SlashCommand for SideCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        let prompt = args.trim();
-        if prompt.is_empty() {
-            // Bare `/side` — scaffold toast until dispatch creates the chat.
-            CommandResult::Message("Side chats coming soon (scaffold) — try /side <question>".to_string())
-        } else {
-            // With text — route through Action so dispatch can create SideChat
-            // via `AppView::side_chats.create_side(parent_id, prompt)` and toast.
-            // For scaffold, also toast immediately if no session/active agent.
-            let _ = prompt;
-            CommandResult::Action(Action::CreateSideChat {
+        let trimmed = args.trim();
+        if trimmed.is_empty() {
+            // Bare `/side` — create empty side chat (no initial prompt).
+            return CommandResult::Action(Action::CreateSideChat {
                 parent_id: String::new(),
-                prompt: prompt.to_string(),
-            })
+                prompt: String::new(),
+            });
         }
+        // Subcommands within `/side ...`
+        let lower = trimmed.to_ascii_lowercase();
+        if lower == "list" || lower == "ls" {
+            return CommandResult::Action(Action::ListSideChats);
+        }
+        if lower.strip_prefix("switch ").is_some() {
+            let id = trimmed[7..].trim();
+            if id.is_empty() {
+                return CommandResult::Message("Usage: /side switch <id>".to_string());
+            }
+            return CommandResult::Action(Action::SwitchSideChat { id: id.to_string() });
+        }
+        if lower.strip_prefix("close ").is_some() {
+            let id = trimmed[6..].trim();
+            if id.is_empty() {
+                return CommandResult::Message("Usage: /side close <id>".to_string());
+            }
+            return CommandResult::Action(Action::CloseSideChat { id: id.to_string() });
+        }
+        // Otherwise treat as initial question / follow-up if active side chat exists is handled in dispatch.
+        CommandResult::Action(Action::CreateSideChat {
+            parent_id: String::new(),
+            prompt: trimmed.to_string(),
+        })
     }
 }
 
-/// `/sides` — list side chats (scaffold: toast with count).
+/// `/sides` — list side chats (toast with count). Also ` /side list` alternative.
 pub struct SidesCommand;
 
 impl SlashCommand for SidesCommand {

@@ -7,7 +7,10 @@
 //!
 //! See `docs/cursor-research.md §8` and `docs/rivo-modes-implementation.md §7`.
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Style;
+use ratatui::widgets::{Block, BorderType, Borders, Widget};
 use serde::{Deserialize, Serialize};
 
 /// Unique identifier for a window (tiled pane).
@@ -300,6 +303,110 @@ impl WindowManager {
                 split.ratio = split.ratio.clamp(10, 90);
             }
         }
+    }
+
+    /// Draw tiled boxes for visible windows inside `area`.
+    ///
+    /// Behind flag: no-op when not tiled (single visible window or tiling off).
+    /// For now just visual `Block` boxes with titles (ratatui `Block` +
+    /// `Borders::ALL`). Full per-tile `AgentView` comes later.
+    /// Minimized windows render as pill `Tab` chips at the bottom; focused
+    /// window gets highlight border.
+    pub fn draw_tiled_boxes(&self, area: Rect, buf: &mut Buffer, focused_id: Option<&str>) {
+        if !self.is_tiled() {
+            return;
+        }
+        let rects = self.compute_tiled_layout(area);
+        let visible: Vec<&Window> = self.visible_windows();
+        for (i, win) in visible.iter().enumerate() {
+            if i >= rects.len() {
+                break;
+            }
+            let rect = rects[i];
+            if rect.width < 3 || rect.height < 3 {
+                continue;
+            }
+            let is_focused = Some(win.id.as_str()) == focused_id;
+            let border_style = if is_focused {
+                Style::default().fg(ratatui::style::Color::Cyan)
+            } else {
+                Style::default().fg(ratatui::style::Color::DarkGray)
+            };
+            let title = if win.title.is_empty() {
+                win.id.clone()
+            } else {
+                win.title.clone()
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(border_style)
+                .title(title);
+            let inner = block.inner(rect);
+            block.render(rect, buf);
+            // Reserve inner for future AgentView draw; clear with base bg.
+            for y in inner.y..inner.y + inner.height {
+                for x in inner.x..inner.x + inner.width {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_char(' ');
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw minimized windows as pill tabs at the bottom of `area`.
+    ///
+    /// Returns the rect occupied (height 1 when any minimized, else empty).
+    pub fn draw_minimized_pills(&self, area: Rect, buf: &mut Buffer) -> Rect {
+        let minimized: Vec<&Window> = self.windows.iter().filter(|w| w.minimized).collect();
+        if minimized.is_empty() || area.height == 0 {
+            return Rect::default();
+        }
+        let pill_y = area.y + area.height.saturating_sub(1);
+        let pill_area = Rect::new(area.x, pill_y, area.width, 1);
+        let mut x = pill_area.x;
+        for win in minimized {
+            let label = format!("[ {} ]", win.title);
+            let w = label.len() as u16;
+            if x + w > pill_area.x + pill_area.width {
+                break;
+            }
+            let style = Style::default()
+                .fg(ratatui::style::Color::Yellow)
+                .bg(ratatui::style::Color::DarkGray);
+            for (i, ch) in label.chars().enumerate() {
+                if let Some(cell) = buf.cell_mut((x + i as u16, pill_y)) {
+                    cell.set_char(ch);
+                    cell.set_style(style);
+                }
+            }
+            x += w + 1;
+        }
+        pill_area
+    }
+
+    /// Whether any window is minimized.
+    pub fn has_minimized(&self) -> bool {
+        self.windows.iter().any(|w| w.minimized)
+    }
+
+    /// Hit-test which split divisor contains `x` (for drag). Returns split index.
+    pub fn hit_test_split(&self, area: Rect, x: u16) -> Option<usize> {
+        if !self.is_tiled() {
+            return None;
+        }
+        let rects = self.compute_tiled_layout(area);
+        for (i, rect) in rects.iter().enumerate() {
+            if i + 1 < rects.len() {
+                let div_x = rect.x + rect.width;
+                // Divisor is 1-char wide gutter between rects
+                if x == div_x || x + 1 == div_x {
+                    return Some(i);
+                }
+            }
+        }
+        None
     }
 }
 

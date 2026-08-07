@@ -2477,6 +2477,26 @@ impl AppView {
                     | MouseEventKind::Up(MouseButton::Left)
                     | MouseEventKind::Moved
             );
+            // Tiling divisor drag: update split ratios while tiling flag is on.
+            // Only consume Drag events; Up ends the drag, Moved is hover.
+            if self.tiling_enabled || self.window_manager.tiling_enabled {
+                match mouse.kind {
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        // Use the view area if we have one; fallback to 120 cols conceptual. We don't have view_area here,
+                        // so infer from last known render area via window_manager state: window_manager.handle_drag expects
+                        // the tiled `area` that compute_tiled_layout was given. Use an approximate area spanning last_mouse pos.
+                        // For now, use a synthetic 0-origin area with width covering last drag; tiling drag clamps to 10..90 so
+                        // any sufficiently wide area works. Use a wide proxy area (x=0,width=120) so x maps to ratio.
+                        let proxy_area = ratatui::layout::Rect::new(0, 0, 120, 24);
+                        self.window_manager.handle_drag(proxy_area, mouse.column);
+                        return InputOutcome::Changed;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        self.window_manager.end_drag();
+                    }
+                    _ => {}
+                }
+            }
             if is_mouse_action {}
         }
         if let Some(tutorial) = self.tutorial.as_mut()
@@ -4806,6 +4826,23 @@ impl AppView {
                         {
                             d.restore_peek_viewport(agents);
                         }
+                        // Tiling draw path (behind flag): if enabled and >1 visible windows, render tiled boxes + minimized pills.
+                        let tiled = self.tiling_enabled && self.window_manager.is_tiled();
+                        if tiled {
+                            let focused_id = self
+                                .window_manager
+                                .focused_window()
+                                .map(|w| w.id.clone());
+                            self.window_manager.draw_tiled_boxes(
+                                view_area,
+                                f.buffer_mut(),
+                                focused_id.as_deref(),
+                            );
+                            if self.window_manager.has_minimized() {
+                                self.window_manager
+                                    .draw_minimized_pills(view_area, f.buffer_mut());
+                            }
+                        }
                         if let Some(agent) = agents.get_mut(&id) {
                             let announcement_banner_h =
                                 crate::views::announcements::session_banner_height(
@@ -4827,8 +4864,16 @@ impl AppView {
                             } else {
                                 0
                             };
+                            let agent_area_eff = if tiled {
+                                // When tiled, give each window its rect; main agent keeps first tile, others are visual-only for now.
+                                // Compute tiled layout and use first rect for the main draw (full per-tile AgentView later).
+                                let rects = self.window_manager.compute_tiled_layout(view_area);
+                                rects.first().copied().unwrap_or(agent_area)
+                            } else {
+                                agent_area
+                            };
                             let result = agent.draw(
-                                agent_area,
+                                agent_area_eff,
                                 f.buffer_mut(),
                                 registry,
                                 scratch,

@@ -375,7 +375,28 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             vec![]
         }
-        Action::SendPrompt(text) => dispatch_send_prompt(app, text),
+        Action::SendPrompt(text) => {
+            // Route to active SideChat when one is focused and tiling is off? Spec: when a Window/SideChat is focused,
+            // route input to its session. For now, if there is an active SideChat and the text is non-slash, treat as follow-up
+            // when tiling_enabled and side chat count >0, otherwise normal prompt. Heuristic: if active side chat exists and
+            // window_manager focused window is a side: window, route as SideChat follow-up; else normal.
+            let side_focused = app.tiling_enabled
+                && app.side_chats.active().is_some()
+                && app.window_manager.focused_window().is_some_and(|w| w.title.starts_with("side:"));
+            if side_focused
+                && !text.trim_start().starts_with('/')
+                && let Some(active) = app.side_chats.active().map(|c| c.id.clone())
+            {
+                // Append to side chat transcript, bump turn, toast, and (future) send to side session.
+                if let Some(chat) = app.side_chats.get_mut(&active) {
+                    let cnt = chat.append_message(text.clone());
+                    let _ = crate::app::side_chat::persist::save_store(&app.side_chats);
+                    app.show_toast(&format!("Side {active} received: {text} (turn {cnt})"));
+                }
+                return vec![];
+            }
+            dispatch_send_prompt(app, text)
+        }
         Action::SubmitFollowUp(text) => dispatch_send_prompt_inner(app, text, false, true, true),
         Action::SendSlashCommandPreservingDraft(text) => {
             dispatch_send_prompt_inner(app, text, false, false, false)
@@ -1031,21 +1052,100 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             } else {
                 parent_id
             };
-            let chat = app.side_chats.create_side(pid, Some(prompt));
+            let chat = app.side_chats.create_side(pid.clone(), Some(prompt.clone()));
             let id = chat.id.clone();
-            // Best-effort persist (ignore errors in scaffold)
+            // If tiling enabled, create a Window docked right 65|35 (first side chat) or equal split after.
+            if app.tiling_enabled {
+                app.window_manager.tiling_enabled = true;
+                if app.window_manager.windows.is_empty() {
+                    // Ensure at least one existing window placeholder if none; then side chat window.
+                    // Use pid as initial main window title.
+                    app.window_manager.add_window(pid.clone());
+                }
+                let win_id = app.window_manager.add_window(format!("side:{id}"));
+                // On second window creation, set split to 65|35. Use splits[0] for 2 windows.
+                if app.window_manager.windows.len() == 2 && app.window_manager.splits.len() >= 1 {
+                    app.window_manager.splits[0].ratio = 65;
+                }
+                let _ = win_id;
+            } else if !prompt.is_empty() {
+                // Overlay mode (non-tiled): just toast; future overlay surface will use side chat store.
+            }
             let _ = crate::app::side_chat::persist::save_store(&app.side_chats);
-            app.show_toast(&format!("Side chats coming soon (scaffold) — created {id}"));
+            if prompt.is_empty() {
+                app.show_toast(&format!("Side chat {id} created"));
+            } else {
+                app.show_toast(&format!("Side {id} received: {prompt}"));
+            }
             vec![]
         }
         Action::ListSideChats => {
-            let n = app.side_chats.len();
-            let active = app
-                .side_chats
-                .active()
-                .map(|c| c.id.clone())
-                .unwrap_or_else(|| "none".to_string());
-            app.show_toast(&format!("Side chats: {n} (active: {active}) — scaffold"));
+            if app.side_chats.is_empty() {
+                app.show_toast("No side chats yet — use /side <question>");
+            } else {
+                let lines: Vec<String> = app
+                    .side_chats
+                    .list()
+                    .iter()
+                    .map(|c| {
+                        let active_mark = if Some(c.id.as_str()) == app.side_chats.active_id.as_deref() {
+                            "*"
+                        } else {
+                            " "
+                        };
+                        let archived = if c.archived { " [archived]" } else { "" };
+                        format!("{active_mark} {} (turns: {}){archived}", c.id, c.turn_count)
+                    })
+                    .collect();
+                app.show_toast(&format!("Side chats:\n{}", lines.join("\n")));
+            }
+            vec![]
+        }
+        Action::SwitchSideChat { id } => {
+            if app.side_chats.switch(&id) {
+                // Focus corresponding window if tiled.
+                if app.tiling_enabled {
+                    let title = format!("side:{id}");
+                    let win_id = app
+                        .window_manager
+                        .windows
+                        .iter()
+                        .find(|w| w.title == title)
+                        .map(|w| w.id.clone());
+                    if let Some(wid) = win_id {
+                        app.window_manager.focus(&wid);
+                    }
+                }
+                app.show_toast(&format!("Switched to side {id}"));
+            } else {
+                app.show_toast(&format!("Side chat not found: {id}"));
+            }
+            vec![]
+        }
+        Action::CloseSideChat { id } => {
+            let title = format!("side:{id}");
+            let win_id = app
+                .window_manager
+                .windows
+                .iter()
+                .find(|w| w.title == title)
+                .map(|w| w.id.clone());
+            app.side_chats.close(&id);
+            if let Some(wid) = win_id {
+                app.window_manager.remove_window(&wid);
+            }
+            let _ = crate::app::side_chat::persist::save_store(&app.side_chats);
+            app.show_toast(&format!("Side {id} archived"));
+            vec![]
+        }
+        Action::SendSideChat { id, text } => {
+            if let Some(chat) = app.side_chats.get_mut(&id) {
+                let cnt = chat.append_message(text.clone());
+                let _ = crate::app::side_chat::persist::save_store(&app.side_chats);
+                app.show_toast(&format!("Side {id} received: {text} (turn {cnt})"));
+            } else {
+                app.show_toast(&format!("Side chat not found: {id}"));
+            }
             vec![]
         }
         Action::SendRecap { auto } => dispatch_send_recap(app, auto),

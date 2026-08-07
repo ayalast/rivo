@@ -718,10 +718,16 @@ pub enum Action {
     SaveRememberNoteFromModal,
     /// Send a /btw side question (bypasses queue, works while agent is busy).
     SendBtw(String),
-    /// Create a durable side chat (scaffold: parent_id + initial prompt).
+    /// Create a durable side chat (parent_id + initial prompt).
     CreateSideChat { parent_id: String, prompt: String },
-    /// List side chats (scaffold: shows toast with counts).
+    /// List side chats (shows toast with counts).
     ListSideChats,
+    /// Switch active side chat.
+    SwitchSideChat { id: String },
+    /// Close (archive) a side chat + remove its window.
+    CloseSideChat { id: String },
+    /// Send follow-up text to a side chat (append transcript, bump turn_count).
+    SendSideChat { id: String, text: String },
     /// Request a session recap ("where was I" summary). `auto` is `true` for
     /// the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).
