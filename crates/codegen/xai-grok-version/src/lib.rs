@@ -6,7 +6,8 @@ pub const TEST_VERSION_ENV: &str = "GROK_TEST_VERSION";
 
 pub const VERSION: &str = match option_env!("GROK_VERSION") {
     Some(v) => v,
-    None => env!("CARGO_PKG_VERSION"),
+    // rivo: show 1.0.0 (marketing 1.0, Aug 7 2026) instead of crate 0.2.121 when built without GROK_VERSION
+    None => "1.0.0",
 };
 
 /// [`TEST_VERSION_ENV`] override first, then [`VERSION`]. Trimmed so

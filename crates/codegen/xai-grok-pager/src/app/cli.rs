@@ -401,9 +401,9 @@ pub struct LeaderArgs {
 }
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "grok",
+    name = "rivo",
     version = env!("VERSION_WITH_COMMIT"),
-    about = "Grok Build TUI",
+    about = "rivo — fork of Grok Build 1.0 without upgrade nags",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\

@@ -13,9 +13,7 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let version = std::env::var("GROK_VERSION")
-        .or_else(|_| std::env::var("CARGO_PKG_VERSION"))
-        .unwrap_or_else(|_| "0.0.0".to_string());
+    let version = std::env::var("GROK_VERSION").unwrap_or_else(|_| "1.0.0".to_string());
 
     println!(
         "cargo:rustc-env=VERSION_WITH_COMMIT={} ({})",
