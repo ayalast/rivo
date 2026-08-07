@@ -623,346 +623,90 @@ pub(super) fn active_agent_plan_nudge_state(app: &AppView) -> (bool, bool) {
     }
 }
 
-/// Cycle session mode: Normal → Plan → Always-Approve → Normal.
+/// Cycle agent mode: Normal → Plan → Ask → Debug → Multitask → Normal.
 ///
-/// Uses `plan_mode_pending` (optimistic) when available, falling back to
-/// `plan_mode_active` (confirmed by ACP). This prevents double-sends when
-/// the user presses Shift+Tab faster than the ACP round-trip.
+/// YOLO / Always-Approve is orthogonal (Ctrl+O) and not part of the ring.
+/// Uses `AgentMode::next()` as single source of truth. Plan transitions still
+/// maintain the optimistic `plan_mode_pending` / `deferred_session_mode` pair
+/// so rapid Shift+Tab and pre-session staging remain correct.
 fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    // Capture the pin before borrowing `agent`: the "→ Always-Approve" arms are
-    // yolo-enabling, but a `yolo_enable_blocked(app, _)` call would conflict with
-    // the live `&mut agent`. This is the same predicate (enabling = true here).
+    // Keep the policy pin captured before borrowing `agent`, even though the
+    // current 5-step ring does not enable YOLO directly (YOLO stays orthogonal
+    // via Ctrl+O). Retained as guard for future YOLO interactions and to keep
+    // the borrow structure identical to the pre-rivo version.
     let yolo_locked = app.yolo_policy_block;
-    // Feature gate (default ON): when the auto permission mode is disabled, the
-    // Shift+Tab cycle skips Auto entirely (legacy Normal→Plan→Always-Approve→
-    // Normal), so Auto is never reachable from the cycle. Resolved once at
-    // startup into `app.auto_mode_gate`.
-    let auto_gate = app.auto_mode_gate;
+    let _ = yolo_locked;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    // Per-session (symmetric with the `in_yolo` reads below), not the global UI
-    // mirror, so the cycle and the prompt "auto" indicator agree per agent.
-    let in_auto = agent.session.is_auto();
-    let Some(session_id) = agent.session.session_id.clone() else {
-        // No session yet (Shift+Tab forwarded from the welcome screen or a
-        // fresh tab): cycle the mode locally and stash the ACP push in
-        // `deferred_session_mode` — consumed by the `SessionCreated`
-        // handlers, same mechanism as the dashboard's staged plan mode.
-        // Cycle: Normal → Plan → Auto → Always-Approve → Normal (Auto skipped
-        // when always-approve is the only remaining arm under a yolo pin).
-        // Each arm yields the canonical permission mode to persist (`None`
-        // when it is untouched, i.e. Normal → Plan); see the push below.
-        let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
-        let in_yolo = agent.session.is_yolo();
-        let persist_canonical: Option<&'static str> = match (in_plan, in_auto, in_yolo) {
-            // Normal → Plan
-            (false, false, false) => {
-                agent.plan_mode_pending = Some(true);
-                agent.deferred_session_mode = Some(xai_grok_tools::types::SessionMode::Plan);
-                agent.show_mode_switch_banner("Plan");
-                tracing::info!("Mode cycle (pre-session): Normal → Plan");
-                None
-            }
-            // Plan → Auto (or Plan → Always-Approve when the auto feature is
-            // gated off, matching the legacy Normal→Plan→Always-Approve cycle).
-            (true, false, false) => {
-                agent.plan_mode_pending = Some(false);
-                agent.deferred_session_mode = None;
-                if auto_gate {
-                    // Clear any launch-seeded yolo so the created session isn't
-                    // started in yolo while the UI shows Auto (SessionFlags reads
-                    // default_yolo at CreateSession).
-                    agent.session.yolo_mode = false;
-                    app.default_yolo = false;
-                    app.current_ui.permission_mode = Some("auto".into());
-                    agent.show_mode_switch_banner("Auto");
-                    tracing::info!("Mode cycle (pre-session): Plan → Auto");
-                    Some("auto")
-                } else if let Some(warning) = yolo_locked {
-                    app.current_ui.permission_mode = Some("ask".into());
-                    agent.session.yolo_mode = false;
-                    app.default_yolo = false;
-                    agent.show_toast(warning);
-                    agent.show_mode_switch_banner("Normal");
-                    tracing::info!("Mode cycle (pre-session): Plan → Normal (auto gated, policy)");
-                    Some("ask")
-                } else {
-                    agent.session.yolo_mode = true;
-                    app.default_yolo = true;
-                    app.current_ui.permission_mode = Some("always-approve".into());
-                    agent.show_mode_switch_banner("Always-Approve");
-                    tracing::info!("Mode cycle (pre-session): Plan → Always-Approve (auto gated)");
-                    Some("always-approve")
-                }
-            }
-            // Auto → Always-Approve (or Normal if pinned)
-            (false, true, false) => {
-                if let Some(warning) = yolo_locked {
-                    app.current_ui.permission_mode = Some("ask".into());
-                    agent.session.yolo_mode = false;
-                    app.default_yolo = false;
-                    agent.show_toast(warning);
-                    agent.show_mode_switch_banner("Normal");
-                    tracing::info!("Mode cycle (pre-session): Auto → Normal (policy)");
-                    Some("ask")
-                } else {
-                    agent.session.yolo_mode = true;
-                    app.default_yolo = true;
-                    app.current_ui.permission_mode = Some("always-approve".into());
-                    agent.show_mode_switch_banner("Always-Approve");
-                    tracing::info!("Mode cycle (pre-session): Auto → Always-Approve");
-                    Some("always-approve")
-                }
-            }
-            // Always-Approve → Normal
-            (false, _, true) => {
-                agent.session.yolo_mode = false;
-                app.default_yolo = false;
-                app.current_ui.permission_mode = Some("ask".into());
-                agent.show_mode_switch_banner("Normal");
-                tracing::info!("Mode cycle (pre-session): Always-Approve → Normal");
-                Some("ask")
-            }
-            // Plan + Auto → Auto (exit plan, keep the classifier), matching the
-            // with-session `(true, true, false, …)` arm. Every other plan+weird
-            // state (notably Plan+yolo) resets to Normal, matching the
-            // with-session catch-all — both paths MUST agree on the same input.
-            // Clear stale yolo so enforcement matches the displayed mode.
-            (true, _, _) => {
-                agent.plan_mode_pending = Some(false);
-                agent.deferred_session_mode = None;
-                agent.session.yolo_mode = false;
-                app.default_yolo = false;
-                if auto_gate && in_auto && !in_yolo {
-                    app.current_ui.permission_mode = Some("auto".into());
-                    agent.show_mode_switch_banner("Auto");
-                    tracing::info!("Mode cycle (pre-session): Plan+Auto → Auto");
-                    Some("auto")
-                } else {
-                    app.current_ui.permission_mode = Some("ask".into());
-                    agent.show_mode_switch_banner("Normal");
-                    tracing::info!("Mode cycle (pre-session): Plan(*) → Normal");
-                    Some("ask")
-                }
-            }
-        };
-        refresh_open_settings_modals(app);
-        let mut effects = Vec::new();
-        // Persist the displayed mode to disk like the with-session arms do —
-        // otherwise a restart re-reads the stale launch value (e.g. cycling
-        // Always-Approve off pre-session still relaunched in yolo).
-        // `session_id: None` skips the ACP yolo_mode_changed push because there is no session to address yet.
-        // Known gap: the `_meta` seeds were already frozen when CreateSession went out, so a yolo or auto choice made
-        // here reaches the shell only on the next explicit switch. Plan is the one mode that replays, via
-        // `deferred_session_mode` in `handle_session_created`.
-        if let Some(canonical) = persist_canonical {
-            effects.push(Effect::PersistPermissionMode {
-                canonical,
-                session_id: None,
-                persist: crate::app::actions::PermissionModePersist::BestEffort,
-            });
-        }
-        return effects;
-    };
+    let curr = agent.agent_mode;
+    let next = curr.next();
+    agent.agent_mode = next;
+    let banner_label = next.label();
 
-    // Effective plan state: prefer optimistic pending over confirmed active.
-    let in_plan = agent.plan_mode_pending.unwrap_or(agent.plan_mode_active);
-    let in_yolo = agent.session.is_yolo();
+    let entering_plan = next == crate::app::agent_mode::AgentMode::Plan;
+    let leaving_plan = curr == crate::app::agent_mode::AgentMode::Plan
+        && next != crate::app::agent_mode::AgentMode::Plan;
 
-    match (in_plan, in_auto, in_yolo) {
-        // Normal → Plan
-        (false, false, false) => {
+    let session_id = agent.session.session_id.clone();
+
+    if let Some(sid) = session_id {
+        // Active session path
+        if entering_plan {
             agent.plan_mode_pending = Some(true);
-            agent.show_mode_switch_banner("Plan");
+            agent.show_mode_switch_banner(banner_label);
             refresh_open_settings_modals(app);
             tracing::info!("Mode cycle: Normal → Plan");
-            vec![Effect::SetSessionMode {
-                session_id,
-                mode_id: acp::SessionModeId::new(xai_grok_tools::types::SessionMode::Plan.as_id()),
-            }]
+            return vec![Effect::SetSessionMode {
+                session_id: sid,
+                mode_id: acp::SessionModeId::new(
+                    xai_grok_tools::types::SessionMode::Plan.as_id(),
+                ),
+            }];
         }
-        // Plan → Auto (classifier mode; exit plan, not always-approve).
-        // When the auto feature is gated off, Plan → Always-Approve (skip Auto),
-        // matching the legacy cycle and respecting the yolo policy pin.
-        (true, false, false) => {
+        if leaving_plan {
             agent.plan_mode_pending = Some(false);
-            if !auto_gate {
-                if let Some(warning) = yolo_locked {
-                    set_yolo_mode_inner(app, false);
-                    app.current_ui.permission_mode = Some("ask".into());
-                    refresh_open_settings_modals(app);
-                    if let Some(a) = app.agents.get_mut(&id) {
-                        a.show_toast(warning);
-                        a.show_mode_switch_banner("Normal");
-                    }
-                    tracing::info!(
-                        "Mode cycle: Plan → Normal (auto gated, always-approve blocked by policy)"
-                    );
-                    // Exit Plan on the agent too; a policy pin must not strand the session in Plan.
-                    return vec![
-                        Effect::SetSessionMode {
-                            session_id: session_id.clone(),
-                            mode_id: acp::SessionModeId::new(
-                                xai_grok_tools::types::SessionMode::Default.as_id(),
-                            ),
-                        },
-                        Effect::PersistPermissionMode {
-                            canonical: "ask",
-                            session_id: Some(session_id),
-                            persist: crate::app::actions::PermissionModePersist::BestEffort,
-                        },
-                    ];
-                }
-                set_yolo_mode_inner(app, true);
-                app.current_ui.permission_mode = Some("always-approve".into());
-                refresh_open_settings_modals(app);
-                if let Some(a) = app.agents.get_mut(&id) {
-                    a.show_mode_switch_banner("Always-Approve");
-                }
-                tracing::info!("Mode cycle: Plan → Always-Approve (auto gated)");
-                return vec![
-                    Effect::SetSessionMode {
-                        session_id: session_id.clone(),
-                        mode_id: acp::SessionModeId::new(
-                            xai_grok_tools::types::SessionMode::Default.as_id(),
-                        ),
-                    },
-                    Effect::PersistPermissionMode {
-                        canonical: "always-approve",
-                        session_id: Some(session_id),
-                        persist: crate::app::actions::PermissionModePersist::BestEffort,
-                    },
-                ];
-            }
-            set_yolo_mode_inner(app, false);
-            app.current_ui.permission_mode = Some("auto".into());
+            agent.show_mode_switch_banner(banner_label);
             refresh_open_settings_modals(app);
-            if let Some(a) = app.agents.get_mut(&id) {
-                a.show_mode_switch_banner("Auto");
-            }
-            tracing::info!("Mode cycle: Plan → Auto");
-            vec![
-                Effect::SetSessionMode {
-                    session_id: session_id.clone(),
-                    mode_id: acp::SessionModeId::new(
-                        xai_grok_tools::types::SessionMode::Default.as_id(),
-                    ),
-                },
-                Effect::PersistPermissionMode {
-                    canonical: "auto",
-                    session_id: Some(session_id),
-                    persist: crate::app::actions::PermissionModePersist::BestEffort,
-                },
-            ]
+            tracing::info!("Mode cycle: Plan → {}", banner_label);
+            return vec![Effect::SetSessionMode {
+                session_id: sid,
+                mode_id: acp::SessionModeId::new(
+                    xai_grok_tools::types::SessionMode::Default.as_id(),
+                ),
+            }];
         }
-        // Auto → Always-Approve (or Normal when policy pins yolo off)
-        (false, true, false) => {
-            if let Some(warning) = yolo_locked {
-                set_yolo_mode_inner(app, false);
-                app.current_ui.permission_mode = Some("ask".into());
-                refresh_open_settings_modals(app);
-                if let Some(a) = app.agents.get_mut(&id) {
-                    a.show_toast(warning);
-                    a.show_mode_switch_banner("Normal");
-                }
-                tracing::info!("Mode cycle: Auto → Normal (always-approve blocked by policy)");
-                return vec![Effect::PersistPermissionMode {
-                    canonical: "ask",
-                    session_id: Some(session_id),
-                    persist: crate::app::actions::PermissionModePersist::BestEffort,
-                }];
-            }
-            set_yolo_mode_inner(app, true);
-            app.current_ui.permission_mode = Some("always-approve".into());
-            refresh_open_settings_modals(app);
-            if let Some(a) = app.agents.get_mut(&id) {
-                a.show_mode_switch_banner("Always-Approve");
-            }
-            tracing::info!("Mode cycle: Auto → Always-Approve");
-            vec![Effect::PersistPermissionMode {
-                canonical: "always-approve",
-                session_id: Some(session_id),
-                persist: crate::app::actions::PermissionModePersist::BestEffort,
-            }]
-        }
-        // Always-Approve → Normal
-        (false, _, true) => {
-            set_yolo_mode_inner(app, false);
-            app.current_ui.permission_mode = Some("ask".into());
-            refresh_open_settings_modals(app);
-            if let Some(a) = app.agents.get_mut(&id) {
-                a.show_mode_switch_banner("Normal");
-            }
-            tracing::info!("Mode cycle: Always-Approve → Normal");
-            vec![Effect::PersistPermissionMode {
-                canonical: "ask",
-                session_id: Some(session_id),
-                persist: crate::app::actions::PermissionModePersist::BestEffort,
-            }]
-        }
-
-        // Plan + Auto → Auto: exit plan but keep the classifier. Without this
-        // explicit arm the state falls to `_` and would reset to Normal/ask.
-        (true, true, false) => {
+        // Non-Plan transitions: only agent_mode + banner
+        agent.show_mode_switch_banner(banner_label);
+        refresh_open_settings_modals(app);
+        tracing::info!("Mode cycle: {} → {}", curr.label(), banner_label);
+        Vec::new()
+    } else {
+        // Pre-session path — no ACP session yet. Mirror Plan staging via
+        // deferred_session_mode so handle_session_created can replay it.
+        if entering_plan {
+            agent.plan_mode_pending = Some(true);
+            agent.deferred_session_mode =
+                Some(xai_grok_tools::types::SessionMode::Plan);
+            agent.show_mode_switch_banner(banner_label);
+            tracing::info!("Mode cycle (pre-session): Normal → Plan");
+        } else if leaving_plan {
             agent.plan_mode_pending = Some(false);
-            app.current_ui.permission_mode = Some("auto".into());
-            refresh_open_settings_modals(app);
-            if let Some(a) = app.agents.get_mut(&id) {
-                a.show_mode_switch_banner("Auto");
-            }
-            tracing::info!("Mode cycle: Plan+Auto → Auto (exit plan, keep classifier)");
-            vec![
-                Effect::SetSessionMode {
-                    session_id: session_id.clone(),
-                    mode_id: acp::SessionModeId::new(
-                        xai_grok_tools::types::SessionMode::Default.as_id(),
-                    ),
-                },
-                Effect::PersistPermissionMode {
-                    canonical: "auto",
-                    session_id: Some(session_id),
-                    persist: crate::app::actions::PermissionModePersist::BestEffort,
-                },
-            ]
+            agent.deferred_session_mode = None;
+            agent.show_mode_switch_banner(banner_label);
+            tracing::info!("Mode cycle (pre-session): Plan → {}", banner_label);
+        } else {
+            agent.show_mode_switch_banner(banner_label);
+            tracing::info!(
+                "Mode cycle (pre-session): {} → {}",
+                curr.label(),
+                banner_label
+            );
         }
-
-        // Any other combination → reset to Normal.
-        // YOLO inner only called when actually in YOLO (avoids
-        // spurious telemetry).
-        _ => {
-            agent.plan_mode_pending = Some(false);
-            // NLL releases the `agent` borrow after the assignment
-            // above; `set_yolo_mode_inner(app, …)` can reborrow below.
-            if in_yolo {
-                set_yolo_mode_inner(app, false);
-            }
-            app.current_ui.permission_mode = Some("ask".into());
-            refresh_open_settings_modals(app);
-            if let Some(a) = app.agents.get_mut(&id) {
-                a.show_mode_switch_banner("Normal");
-            }
-            tracing::info!("Mode cycle: mixed state → Normal");
-            let mut effects = vec![];
-            if in_plan {
-                effects.push(Effect::SetSessionMode {
-                    session_id: session_id.clone(),
-                    mode_id: acp::SessionModeId::new(
-                        xai_grok_tools::types::SessionMode::Default.as_id(),
-                    ),
-                });
-            }
-            if in_yolo || in_auto {
-                effects.push(Effect::PersistPermissionMode {
-                    canonical: "ask",
-                    session_id: Some(session_id),
-                    persist: crate::app::actions::PermissionModePersist::BestEffort,
-                });
-            }
-            effects
-        }
+        refresh_open_settings_modals(app);
+        Vec::new()
     }
 }

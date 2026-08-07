@@ -1477,6 +1477,17 @@ impl AgentView {
                 Line::from(Span::styled(indicator, indicator_style)),
             );
         }
+        if self.agent_mode != crate::app::agent_mode::AgentMode::Normal {
+            let badge_text = format!("Rivo \u{00B7} {}", self.agent_mode.label());
+            let mut badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+            if self.hit_rivo_mode.hovered {
+                badge_style = badge_style.add_modifier(ratatui::style::Modifier::BOLD);
+            }
+            status.push(
+                "rivo_mode",
+                Line::from(Span::styled(badge_text, badge_style)),
+            );
+        }
         if self.should_show_plan_chip(&appearance) {
             let mut plan_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
             if self.hit_plan_button.hovered {
@@ -1575,6 +1586,7 @@ impl AgentView {
         self.hit_context.rect = areas.get("context").copied();
         self.hit_credits.rect = areas.get("credits").copied();
         self.hit_plan_button.rect = areas.get("plan").copied();
+        self.hit_rivo_mode.rect = areas.get("rivo_mode").copied();
         self.hit_queue_badge.rect = areas.get("queue").copied();
         self.hit_badge.rect = areas.get("badge").copied();
         let home = std::env::var("HOME").ok();

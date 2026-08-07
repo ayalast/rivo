@@ -1334,6 +1334,8 @@ pub struct AgentView {
     /// without yet gating tools — kept in sync with `plan_mode_active` for
     /// backwards-compat. Defaults to `Normal`.
     pub agent_mode: crate::app::agent_mode::AgentMode,
+    /// Hit area for the Rivo mode badge in the status bar (`Rivo · <Mode>`).
+    pub hit_rivo_mode: HitArea,
     /// Session mode to apply once this agent's ACP session exists. Set when
     /// the agent is spawned from the dashboard with `/plan` active (the
     /// session does not exist yet, so the mode can't be sent immediately).
