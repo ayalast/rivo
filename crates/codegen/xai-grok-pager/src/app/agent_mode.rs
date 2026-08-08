@@ -59,6 +59,25 @@ impl AgentMode {
             Self::Multitask => "multitask",
         }
     }
+
+    /// System-prompt injection for this mode (Debug/Multitask).
+    /// `Normal/Plan/Ask` have no extra injection — `None`.
+    /// Returned as a portable prompt fragment to be appended to
+    /// `PromptContext.role_instructions` / the agent's system prompt body.
+    pub fn system_prompt_injection(&self) -> Option<&'static str> {
+        match self {
+            Self::Debug => Some(
+                "You are in Debug mode: generate 2-4 hypotheses, propose instrumented logs with \
+                 [rivo-debug] marks, ask user to reproduce, analyze logs, offer (A) Review logs / \
+                 (B) Solved loop.",
+            ),
+            Self::Multitask => Some(
+                "You are orchestrator: delegate each todo to spawn_subagent, don't edit directly, \
+                 aggregate.",
+            ),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

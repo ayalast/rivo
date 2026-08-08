@@ -1477,18 +1477,47 @@ impl AgentView {
                 Line::from(Span::styled(indicator, indicator_style)),
             );
         }
-        if self.agent_mode != crate::app::agent_mode::AgentMode::Normal {
-            let badge_text = format!("Rivo \u{00B7} {}", self.agent_mode.label());
-            let mut badge_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+        // rivo: YOLO es flag global ortogonal al anillo Shift+Tab — atraviesa Normal/Ask/Debug/Multitask.
+        // Solo respeta el gate de Plan (plan-mode bloquea edits aunque YOLO ON). Badge: Rivo · <Mode> · YOLO
+        let is_yolo = self.session.is_yolo();
+        let mode_label = if self.agent_mode != crate::app::agent_mode::AgentMode::Normal {
+            Some(self.agent_mode.label())
+        } else {
+            None
+        };
+        if mode_label.is_some() || is_yolo {
+            let badge_text = match (mode_label, is_yolo) {
+                (Some(m), true) => format!("Rivo \u{00B7} {m} \u{00B7} YOLO"),
+                (Some(m), false) => format!("Rivo \u{00B7} {m}"),
+                (None, true) => "Rivo \u{00B7} YOLO".to_string(),
+                (None, false) => unreachable!(),
+            };
+            // YOLO segment en warning cuando está presente, para que el flag global sea obvio
+            let base_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
+            let yolo_style = Style::default().fg(theme.warning).bg(theme.bg_base);
+            let mut badge_line = if is_yolo && mode_label.is_some() {
+                // dos spans: "Rivo · <Mode> · " en plan-blue + "YOLO" en warning
+                let prefix = format!("Rivo \u{00B7} {} \u{00B7} ", mode_label.unwrap());
+                vec![
+                    Span::styled(prefix, base_style),
+                    Span::styled("YOLO", yolo_style),
+                ]
+            } else if is_yolo {
+                vec![Span::styled(badge_text.clone(), yolo_style)]
+            } else {
+                vec![Span::styled(badge_text.clone(), base_style)]
+            };
+            // hover bold
             if self.hit_rivo_mode.hovered {
-                badge_style = badge_style.add_modifier(ratatui::style::Modifier::BOLD);
+                for sp in badge_line.iter_mut() {
+                    sp.style = sp.style.add_modifier(ratatui::style::Modifier::BOLD);
+                }
             }
-            status.push(
-                "rivo_mode",
-                Line::from(Span::styled(badge_text, badge_style)),
-            );
+            status.push("rivo_mode", Line::from(badge_line));
         }
-        if self.should_show_plan_chip(&appearance) {
+        // Evitar duplicar "plan" cuando el badge ya muestra Rivo · Plan (mismo gate que grok 1.0)
+        let rivo_covers_plan = self.agent_mode == crate::app::agent_mode::AgentMode::Plan;
+        if self.should_show_plan_chip(&appearance) && !rivo_covers_plan {
             let mut plan_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
             if self.hit_plan_button.hovered {
                 plan_style = plan_style.add_modifier(ratatui::style::Modifier::BOLD);

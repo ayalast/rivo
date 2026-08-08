@@ -963,6 +963,9 @@ pub struct AppView {
     /// Enable plan mode for new sessions (`--plan`).
     /// Adds `enter_plan_mode`, `exit_plan_mode` tools; implies `ask_user`.
     pub plan_mode: bool,
+    /// CLI AgentMode seed ( --debug / --multitask / --mode ... ).
+    /// Applied to new AgentView creation so the first session starts in that mode.
+    pub cli_initial_agent_mode: Option<crate::app::agent_mode::AgentMode>,
     /// Enable subagent spawning for new sessions (`--subagents`).
     /// Adds the `TaskTool` for spawning subagents.
     pub subagents: bool,
@@ -1515,6 +1518,7 @@ impl AppView {
             default_yolo: false,
             permission_mode_from_soft_default: true,
             auto_mode_gate: xai_grok_shell::util::config::auto_permission_mode_enabled_from_disk(),
+            cli_initial_agent_mode: None,
             yolo_policy_block: None,
             yolo_launch_block_notice: None,
             screen_mode_switch_hint: None,

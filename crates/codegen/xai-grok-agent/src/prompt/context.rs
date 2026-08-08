@@ -149,6 +149,9 @@ pub struct PromptContext {
     /// Not the UI picker name. Defaults to [`DEFAULT_SYSTEM_PROMPT_LABEL`].
     #[serde(default = "default_system_prompt_label")]
     pub system_prompt_label: String,
+    /// Rivo mode instruction for Debug/Multitask (v1 prompt emulation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rivo_mode_instruction: Option<String>,
 }
 /// Default identity on trim-tool-descriptions (`You are Grok released by xAI`).
 pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "Grok";
@@ -193,6 +196,7 @@ impl Default for PromptContext {
             current_date: None,
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
+            rivo_mode_instruction: None,
         }
     }
 }
@@ -236,11 +240,25 @@ impl PromptContext {
     /// These are the agent-specific values that get merged with the
     /// tool context in `TemplateRenderer::render_with_extra()`.
     pub fn placeholders(&self) -> serde_json::Value {
+        let role_instructions = {
+            let base = self.role_instructions.as_deref().unwrap_or("");
+            if let Some(rivo) = self.rivo_mode_instruction.as_deref() {
+                if rivo.is_empty() {
+                    base.to_string()
+                } else if base.is_empty() {
+                    rivo.to_string()
+                } else {
+                    format!("{base}\n\n{rivo}")
+                }
+            } else {
+                base.to_string()
+            }
+        };
         serde_json::json!({
             "memory_enabled": self.memory_enabled,
             "memory_global_path": self.memory_global_path.as_deref().unwrap_or(""),
             "memory_workspace_path": self.memory_workspace_path.as_deref().unwrap_or(""),
-            "role_instructions": self.role_instructions.as_deref().unwrap_or(""),
+            "role_instructions": role_instructions,
             "persona_instructions": self.persona_instructions.as_deref().unwrap_or(""),
             "os_name": self.os_name.as_deref().unwrap_or(""),
             "shell_path": self.shell_path.as_deref().unwrap_or(""),

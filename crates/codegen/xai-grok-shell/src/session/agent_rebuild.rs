@@ -106,6 +106,7 @@ pub(crate) struct AgentRebuildSpec {
     pub prompt_audience: PromptAudience,
     pub role_instructions: Option<String>,
     pub persona_instructions: Option<String>,
+    pub rivo_mode_instruction: Option<String>,
     pub skills_config: SkillsConfig,
     /// Resolved vendor-compat config (from `Config::compat_resolved`), threaded
     /// into skills / rules / AGENTS.md discovery via the builder.
@@ -209,6 +210,7 @@ impl AgentRebuildSpec {
             prompt_audience,
             role_instructions,
             persona_instructions,
+            rivo_mode_instruction,
             skills_config,
             compat,
             context_window_tokens,
@@ -276,6 +278,7 @@ impl AgentRebuildSpec {
         .with_prompt_audience(*prompt_audience)
         .with_role_instructions(role_instructions.clone())
         .with_persona_instructions(persona_instructions.clone())
+        .with_rivo_mode_instruction(rivo_mode_instruction.clone())
         .with_skills_config(skills_config.clone())
         .with_compat_config(*compat)
         .with_context_window(*context_window_tokens)
@@ -460,6 +463,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         managed_gateway_tool_client: None,
         is_non_interactive: false,
         system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_string(),
+        rivo_mode_instruction: None,
         owner_session_id: Some("test-session".to_string()),
         parent_scheduler_handle: None,
     })

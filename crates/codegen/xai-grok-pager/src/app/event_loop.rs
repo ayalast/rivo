@@ -829,7 +829,33 @@ pub(crate) async fn run(
         app.yolo_launch_block_notice = Some(warning);
     }
     app.require_plan_approval = xai_grok_shell::util::config::load_require_plan_approval();
-    app.plan_mode = !args.no_plan;
+    // Rivo --debug / --multitask / --mode debug|multitask|ask|plan bootstrap.
+    // Route through AgentMode so validation is single-sourced.
+    let cli_agent_mode = if args.debug_mode {
+        Some(crate::app::agent_mode::AgentMode::Debug)
+    } else if args.multitask {
+        Some(crate::app::agent_mode::AgentMode::Multitask)
+    } else if let Some(ref m) = args.mode {
+        match m.to_ascii_lowercase().as_str() {
+            "debug" => Some(crate::app::agent_mode::AgentMode::Debug),
+            "multitask" => Some(crate::app::agent_mode::AgentMode::Multitask),
+            "ask" => Some(crate::app::agent_mode::AgentMode::Ask),
+            "plan" => Some(crate::app::agent_mode::AgentMode::Plan),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(m) = cli_agent_mode {
+        app.cli_initial_agent_mode = Some(m);
+        if m == crate::app::agent_mode::AgentMode::Plan {
+            app.plan_mode = true;
+        } else {
+            app.plan_mode = !args.no_plan;
+        }
+    } else {
+        app.plan_mode = !args.no_plan;
+    }
     app.subagents = !args.no_subagents;
     app.ask_user = !args.no_ask_user;
     app.chat_mode = args.chat();

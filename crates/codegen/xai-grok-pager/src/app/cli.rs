@@ -615,6 +615,15 @@ pub struct PagerArgs {
     /// Disable plan mode.
     #[arg(long = "no-plan")]
     pub no_plan: bool,
+    /// Start in Debug agent mode (injects Debug system prompt).
+    #[arg(long = "debug-mode", alias = "rivo-debug", global = true)]
+    pub debug_mode: bool,
+    /// Start in Multitask agent mode (injects orchestrator system prompt).
+    #[arg(long = "multitask", global = true)]
+    pub multitask: bool,
+    /// Agent mode selector: ask|plan|debug|multitask (also sets --debug-mode/--multitask).
+    #[arg(long = "mode", value_name = "MODE", global = true)]
+    pub mode: Option<String>,
     /// Own a local `workspace_server` (replaces remote sandbox). Requires `--chat`.
     ///
     /// Compiled only with `--features local-workspace` (not implied by `chat`).

@@ -67,6 +67,7 @@ pub struct AgentBuilder {
     role_instructions: Option<String>,
     /// Persona instructions to inject into the system prompt.
     persona_instructions: Option<String>,
+    rivo_mode_instruction: Option<String>,
     name: Option<String>,
     description: Option<String>,
     prompt_mode: PromptMode,
@@ -211,6 +212,7 @@ impl AgentBuilder {
             prompt_audience: crate::prompt::context::PromptAudience::Primary,
             role_instructions: None,
             persona_instructions: None,
+            rivo_mode_instruction: None,
             name: None,
             description: None,
             prompt_mode: PromptMode::Extend,
@@ -304,6 +306,10 @@ impl AgentBuilder {
     }
     pub fn with_persona_instructions(mut self, instructions: Option<String>) -> Self {
         self.persona_instructions = instructions;
+        self
+    }
+    pub fn with_rivo_mode_instruction(mut self, instructions: Option<String>) -> Self {
+        self.rivo_mode_instruction = instructions;
         self
     }
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -1178,6 +1184,7 @@ impl AgentBuilder {
             ),
             is_non_interactive: self.is_non_interactive,
             system_prompt_label: self.system_prompt_label,
+            rivo_mode_instruction: self.rivo_mode_instruction.clone(),
         };
         let system_prompt = prompt_context
             .render(&tool_bridge)
