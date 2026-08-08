@@ -1109,32 +1109,54 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SendBtw(question) => dispatch_send_btw(app, question),
         Action::CreateSideChat { parent_id, prompt } => {
             let pid = if parent_id.is_empty() {
-                format!("{:?}", app.active_view)
+                app.active_agent()
+                    .and_then(|a| a.session.session_id.as_ref().map(|s| s.0.to_string()))
+                    .unwrap_or_else(|| format!("{:?}", app.active_view))
             } else {
                 parent_id
             };
             let chat = app.side_chats.create_side(pid.clone(), Some(prompt.clone()));
             let id = chat.id.clone();
-            // If tiling enabled, create a Window docked right 65|35 (first side chat) or equal split after.
-            if app.tiling_enabled {
-                app.window_manager.tiling_enabled = true;
-                if app.window_manager.windows.is_empty() {
-                    // Ensure at least one existing window placeholder if none; then side chat window.
-                    // Use pid as initial main window title.
-                    app.window_manager.add_window(pid.clone());
-                }
-                let win_id = app.window_manager.add_window(format!("side:{id}"));
-                // On second window creation, set split to 65|35. Use splits[0] for 2 windows.
-                if app.window_manager.windows.len() == 2 && app.window_manager.splits.len() >= 1 {
-                    app.window_manager.splits[0].ratio = 65;
-                }
-                let _ = win_id;
-            } else if !prompt.is_empty() {
-                // Overlay mode (non-tiled): just toast; future overlay surface will use side chat store.
+            // Cursor-faithful: /side ALWAYS opens tiled pane docked right 65|35.
+            // Previously gated behind tiling_enabled so it only toasted — now auto-enables.
+            app.tiling_enabled = true;
+            app.window_manager.tiling_enabled = true;
+            if app.window_manager.windows.is_empty() {
+                // Seed main window from active session or pid.
+                let main_title = app
+                    .active_agent()
+                    .and_then(|a| a.session.session_id.as_ref().map(|s| s.0.to_string()))
+                    .unwrap_or_else(|| "main".to_string());
+                app.window_manager.add_window(main_title);
+            }
+            // Ensure side window exists (avoid duplicate if re-created).
+            let side_title = format!("side:{id}");
+            let already = app
+                .window_manager
+                .windows
+                .iter()
+                .any(|w| w.title == side_title);
+            if !already {
+                app.window_manager.add_window(side_title.clone());
+            }
+            // On 2 windows, set split to 65|35 (main 65, side 35). Mirrors spec.
+            if app.window_manager.windows.len() == 2 && !app.window_manager.splits.is_empty() {
+                app.window_manager.splits[0].ratio = 65;
+            }
+            // Focus the newly created side window and keep active_id in sync.
+            let win_id = app
+                .window_manager
+                .windows
+                .iter()
+                .find(|w| w.title == side_title)
+                .map(|w| w.id.clone());
+            if let Some(wid) = win_id {
+                app.window_manager.focus(&wid);
             }
             let _ = crate::app::side_chat::persist::save_store(&app.side_chats);
+            let _ = crate::views::window_manager::persist::save(&app.window_manager);
             if prompt.is_empty() {
-                app.show_toast(&format!("Side chat {id} created"));
+                app.show_toast(&format!("Side chat {id} created — 65|35 tiled (Ctrl+Tab focus, Ctrl+←/→ resize, drag │)"));
             } else {
                 app.show_toast(&format!("Side {id} received: {prompt}"));
             }

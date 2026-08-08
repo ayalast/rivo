@@ -1468,6 +1468,13 @@ pub(crate) async fn run(
             // Default file absent -> both are off already.
         }
     }
+    // Hydrate durable side chats (Cursor-faithful: ~/.rivo/side-chats.json + side-*.jsonl, fallback ~/.grok).
+    {
+        let store = crate::app::side_chat::persist::load_store();
+        if !store.is_empty() {
+            app.side_chats = store;
+        }
+    }
     let config_session_bools = load_initial_config_session_bools();
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;

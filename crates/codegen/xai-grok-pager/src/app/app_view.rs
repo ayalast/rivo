@@ -4920,34 +4920,179 @@ impl AppView {
                                 self.window_manager
                                     .draw_minimized_pills(view_area, f.buffer_mut());
                             }
-                            // Also draw placeholder per-tile interiors when >1 visible windows and we have multiple agents.
-                            // Each tile inner gets a faded placeholder title until full per-tile AgentView wiring lands.
+                            // Side panes: render actual side-chat transcript (Cursor-faithful) instead of static placeholder.
+                            // Main tile (idx 0) hosts the full AgentView; extra tiles are side chats with real content.
                             let rects = self.window_manager.compute_tiled_layout(view_area);
-                            let visible: Vec<_> = self.window_manager.visible_windows().iter().map(|w| (w.id.clone(), w.title.clone())).collect();
-                            // If we have tiles for secondary agents, draw their placeholder boxes inside the already-drawn tiled boxes' inner areas.
-                            // Main agent (focused id or first) keeps the full AgentView draw; other tiles show title+placeholder to prove tiling is live.
+                            let visible: Vec<_> = self
+                                .window_manager
+                                .visible_windows()
+                                .iter()
+                                .map(|w| (w.id.clone(), w.title.clone()))
+                                .collect();
                             if rects.len() > 1 && visible.len() > 1 {
-                                for (idx, (win_id, title)) in visible.iter().enumerate().skip(1) {
+                                for (idx, (_win_id, title)) in visible.iter().enumerate().skip(1) {
                                     if idx >= rects.len() {
                                         break;
                                     }
                                     let r = rects[idx];
-                                    if r.width < 4 || r.height < 4 {
+                                    if r.width < 6 || r.height < 5 {
                                         continue;
                                     }
-                                    // Inner placeholder: small text line at inner top showing tile identity
-                                    let inner = {
-                                        let b = ratatui::widgets::Block::default()
-                                            .borders(ratatui::widgets::Borders::ALL)
-                                            .border_type(ratatui::widgets::BorderType::Rounded);
-                                        b.inner(r)
-                                    };
+                                    let inner = ratatui::widgets::Block::default()
+                                        .borders(ratatui::widgets::Borders::ALL)
+                                        .border_type(ratatui::widgets::BorderType::Rounded)
+                                        .inner(r);
+                                    if inner.width < 4 || inner.height < 3 {
+                                        continue;
+                                    }
+                                    // Resolve side chat if this window is a side:
+                                    let side_id_opt = title.strip_prefix("side:").map(|s| s.to_string());
+                                    if let Some(side_id) = side_id_opt {
+                                        if let Some(chat) = self.side_chats.get(&side_id) {
+                                            let header = " New Side Chat ";
+                                            let header_style = ratatui::style::Style::default()
+                                                .fg(ratatui::style::Color::Yellow)
+                                                .add_modifier(ratatui::style::Modifier::BOLD);
+                                            let hdr_x = inner.x;
+                                            let hdr_y = inner.y;
+                                            for (i, ch) in header.chars().enumerate() {
+                                                if hdr_x + i as u16 >= inner.x + inner.width {
+                                                    break;
+                                                }
+                                                if let Some(cell) =
+                                                    f.buffer_mut().cell_mut((hdr_x + i as u16, hdr_y))
+                                                {
+                                                    cell.set_char(ch);
+                                                    cell.set_style(header_style);
+                                                }
+                                            }
+                                            // Turn count badge top-right
+                                            let badge = format!(
+                                                " {} turn{} ",
+                                                chat.turn_count,
+                                                if chat.turn_count == 1 { "" } else { "s" }
+                                            );
+                                            let badge_style = ratatui::style::Style::default()
+                                                .fg(ratatui::style::Color::Cyan);
+                                            let bx = inner
+                                                .x
+                                                .saturating_add(
+                                                    inner.width.saturating_sub(badge.len() as u16 + 1),
+                                                );
+                                            if bx > inner.x {
+                                                for (i, ch) in badge.chars().enumerate() {
+                                                    if let Some(cell) =
+                                                        f.buffer_mut().cell_mut((bx + i as u16, hdr_y))
+                                                    {
+                                                        cell.set_char(ch);
+                                                        cell.set_style(badge_style);
+                                                    }
+                                                }
+                                            }
+                                            // Body: transcript lines wrapped.
+                                            let body_y = inner.y + 1;
+                                            let body_h = inner.height.saturating_sub(3);
+                                            let body_w = inner.width;
+                                            if body_h > 0 && body_w > 0 {
+                                                let raw = if chat.transcript.is_empty() {
+                                                    "Escribe tu pregunta y presiona Enter.\n\nConversacion independiente del chat principal (hereda contexto oculto).".to_string()
+                                                } else {
+                                                    let mut out = String::new();
+                                                    for (i, block) in chat.transcript.iter().enumerate() {
+                                                        let txt = match block {
+                                                            agent_client_protocol::ContentBlock::Text(t) => {
+                                                                t.text.clone()
+                                                            }
+                                                            other => format!("{other:?}"),
+                                                        };
+                                                        if i > 0 {
+                                                            out.push_str("\n\n");
+                                                        }
+                                                        out.push_str(&txt);
+                                                    }
+                                                    out
+                                                };
+                                                let style_body = ratatui::style::Style::default()
+                                                    .fg(ratatui::style::Color::White);
+                                                let mut line_idx: u16 = 0;
+                                                for para in raw.split('\n') {
+                                                    if line_idx >= body_h {
+                                                        break;
+                                                    }
+                                                    if para.is_empty() {
+                                                        line_idx += 1;
+                                                        continue;
+                                                    }
+                                                    let chars: Vec<char> = para.chars().collect();
+                                                    let mut off = 0;
+                                                    while off < chars.len() && line_idx < body_h {
+                                                        let end =
+                                                            (off + body_w as usize).min(chars.len());
+                                                        let slice: String =
+                                                            chars[off..end].iter().collect();
+                                                        for (ci, ch) in slice.chars().enumerate() {
+                                                            if let Some(cell) = f.buffer_mut().cell_mut((
+                                                                inner.x + ci as u16,
+                                                                body_y + line_idx,
+                                                            )) {
+                                                                cell.set_char(ch);
+                                                                cell.set_style(style_body);
+                                                            }
+                                                        }
+                                                        off = end;
+                                                        line_idx += 1;
+                                                        if line_idx >= body_h {
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            // Footer hint at bottom of inner
+                                            let footer_y = inner.y + inner.height - 1;
+                                            if footer_y > inner.y + 1 {
+                                                let hint =
+                                                    " Send follow-up   Ctrl+Tab foco   Ctrl+<-/-> ancho   drag | ";
+                                                let hint_style = ratatui::style::Style::default()
+                                                    .fg(ratatui::style::Color::DarkGray);
+                                                let div_y = footer_y.saturating_sub(1);
+                                                for x in inner.x..inner.x + inner.width {
+                                                    if let Some(cell) =
+                                                        f.buffer_mut().cell_mut((x, div_y))
+                                                    {
+                                                        cell.set_char('\u{2500}');
+                                                        cell.set_style(hint_style);
+                                                    }
+                                                }
+                                                let truncated: String = hint
+                                                    .chars()
+                                                    .take(inner.width as usize)
+                                                    .collect();
+                                                for (i, ch) in truncated.chars().enumerate() {
+                                                    if let Some(cell) = f.buffer_mut()
+                                                        .cell_mut((inner.x + i as u16, footer_y))
+                                                    {
+                                                        cell.set_char(ch);
+                                                        cell.set_style(hint_style);
+                                                    }
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                    // Fallback generic placeholder for non-side tiles
                                     if inner.width >= 6 && inner.height >= 1 {
-                                        let placeholder = format!("{} — placeholder", if title.is_empty() { win_id } else { title });
-                                        let style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
-                                        let truncated: String = placeholder.chars().take(inner.width as usize).collect();
+                                        let placeholder = format!(
+                                            "{} \u{2014} placeholder",
+                                            if title.is_empty() { _win_id } else { title }
+                                        );
+                                        let style = ratatui::style::Style::default()
+                                            .fg(ratatui::style::Color::DarkGray);
+                                        let truncated: String =
+                                            placeholder.chars().take(inner.width as usize).collect();
                                         for (i, ch) in truncated.chars().enumerate() {
-                                            if let Some(cell) = f.buffer_mut().cell_mut((inner.x + i as u16, inner.y)) {
+                                            if let Some(cell) =
+                                                f.buffer_mut().cell_mut((inner.x + i as u16, inner.y))
+                                            {
                                                 cell.set_char(ch);
                                                 cell.set_style(style);
                                             }
@@ -4978,11 +5123,11 @@ impl AppView {
                                 0
                             };
                             let agent_area_eff = if tiled {
-                                // When tiled, give the active agent its tile rect (first tile for now; future: map focused window to agent).
+                                // When tiled, main agent always occupies first tile (rect[0]); side panes are rendered separately above.
+                                // Focus only determines input routing (SendPrompt side_focused) and border highlight, not where main draws.
+                                // Bug fix: previous code used focused_idx (1 when side focused) which made main chat overwrite the side pane.
                                 let rects = self.window_manager.compute_tiled_layout(view_area);
-                                // Pick rect for focused window if we can resolve it, else first tile
-                                let focused_idx = self.window_manager.visible_windows().iter().position(|w| Some(w.id.as_str()) == self.window_manager.focused_window().map(|f| f.id.as_str())).unwrap_or(0);
-                                rects.get(focused_idx).copied().unwrap_or(agent_area)
+                                rects.first().copied().unwrap_or(agent_area)
                             } else {
                                 agent_area
                             };
