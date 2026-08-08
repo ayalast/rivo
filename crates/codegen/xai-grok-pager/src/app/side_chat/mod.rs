@@ -42,10 +42,31 @@ pub struct SideChat {
     /// `true` when minimized (collapsed in list).
     #[serde(default)]
     pub minimized: bool,
+    /// Friendly label for UI, e.g. "Side 1". Serde default for backwards compat.
+    #[serde(default)]
+    pub label: String,
+    /// Draft input for this side chat (unsent prompt). Not rendered in transcript.
+    #[serde(default)]
+    pub draft: String,
+    /// Transient agent linkage, not persisted.
+    #[serde(skip)]
+    pub agent_id: Option<crate::app::agent::AgentId>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
     /// Last activity timestamp.
     pub last_active: DateTime<Utc>,
+}
+
+/// Store for all side chats scoped to the pager process.
+///
+/// Persisted to `~/.rivo/side-chats.json` + per-chat `~/.rivo/sessions/side-*.jsonl`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SideChatStore {
+    /// All chats, including archived. Ordered by creation time.
+    pub chats: Vec<SideChat>,
+    /// Currently active side chat id, if any.
+    #[serde(default)]
+    pub active_id: Option<SideChatId>,
 }
 
 impl SideChat {
@@ -69,6 +90,9 @@ impl SideChat {
             turn_count: 0,
             archived: false,
             minimized: false,
+            label: String::new(),
+            draft: String::new(),
+            agent_id: None,
             created_at: now,
             last_active: now,
         }
@@ -107,18 +131,27 @@ impl SideChat {
         self.touch();
         self.turn_count
     }
-}
 
-/// Store for all side chats scoped to the pager process.
-///
-/// Persisted to `~/.rivo/side-chats.json` + per-chat `~/.rivo/sessions/side-*.jsonl`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SideChatStore {
-    /// All chats, including archived. Ordered by creation time.
-    pub chats: Vec<SideChat>,
-    /// Currently active side chat id, if any.
-    #[serde(default)]
-    pub active_id: Option<SideChatId>,
+    /// Friendly label for display: `label` if non-empty, else short id (last 6 chars).
+    pub fn friendly_label(&self) -> String {
+        if !self.label.trim().is_empty() {
+            self.label.clone()
+        } else if self.id.len() > 6 {
+            self.id[self.id.len() - 6..].to_string()
+        } else {
+            self.id.clone()
+        }
+    }
+
+    /// Set the friendly label.
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+    }
+
+    /// Compute next label for a store: "Side N" where N = store.len() + 1.
+    pub fn next_label(store: &SideChatStore) -> String {
+        format!("Side {}", store.chats.len() + 1)
+    }
 }
 
 impl SideChatStore {
@@ -127,12 +160,19 @@ impl SideChatStore {
         Self::default()
     }
 
+    /// Next friendly label for a new chat: "Side N" where N = len+1.
+    pub fn next_label(&self) -> String {
+        SideChat::next_label(self)
+    }
+
     /// Create a new side chat attached to `parent_id` with optional initial `prompt`.
     ///
     /// Mirrors `SideChat::new` but inserts into the store and returns a clone
     /// of the created chat (so callers can read `id` without borrowing).
+    /// Assigns `label` as "Side N" where N = chats.len()+1.
     pub fn create_side(&mut self, parent_id: impl Into<String>, prompt: Option<String>) -> SideChat {
-        let chat = SideChat::new(parent_id, prompt);
+        let mut chat = SideChat::new(parent_id, prompt);
+        chat.label = self.next_label();
         let cloned = chat.clone();
         self.chats.push(chat);
         self.active_id = Some(cloned.id.clone());
@@ -140,13 +180,15 @@ impl SideChatStore {
     }
 
     /// Create with hidden parent snapshot (Cursor-faithful hidden context).
+    /// Assigns `label` as "Side N" where N = chats.len()+1.
     pub fn create_side_with_snapshot(
         &mut self,
         parent_id: impl Into<String>,
         parent_snapshot: Vec<acp::ContentBlock>,
         prompt: Option<String>,
     ) -> SideChat {
-        let chat = SideChat::with_snapshot(parent_id, parent_snapshot, prompt);
+        let mut chat = SideChat::with_snapshot(parent_id, parent_snapshot, prompt);
+        chat.label = self.next_label();
         let cloned = chat.clone();
         self.chats.push(chat);
         self.active_id = Some(cloned.id.clone());

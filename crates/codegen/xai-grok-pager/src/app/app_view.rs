@@ -1219,8 +1219,8 @@ pub struct AppView {
     /// combinations are unrepresentable; production mutates it only through the
     /// `AppView::voice_*` transition methods.
     pub voice_state: VoiceState,
-    /// Durable side chats (Cursor-faithful). Scaffold: state only, no tiling.
-    /// Gated behind `tiling_enabled` flag on WindowManager.
+    /// Durable side chats (Cursor-faithful). Each side chat is a full AgentView clone,
+    /// not a custom transcript renderer — same prompt, scrollback, tools.
     pub side_chats: crate::app::side_chat::SideChatStore,
     /// Tiled window manager (Cursor-faithful). Scaffold behind flag — existing
     /// single-column layout unchanged when `tiling_enabled == false`.
@@ -1233,6 +1233,10 @@ pub struct AppView {
     pub(crate) tiling_last_area: Option<ratatui::layout::Rect>,
     /// Optional drag target split index while dragging divider.
     pub(crate) tiling_drag_split: Option<usize>,
+    /// Hit area for side-tab close buttons [X] — rebuilt each frame.
+    pub(crate) side_tab_close_hits: Vec<(ratatui::layout::Rect, String)>,
+    /// Hit rects for each tiled window (for click-to-focus) — rebuilt each frame.
+    pub(crate) side_window_hits: Vec<(ratatui::layout::Rect, String)>,
 }
 /// Reshow window elapsed? None/0 = never. Unparseable ack fails open (show).
 fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
@@ -1650,6 +1654,8 @@ impl AppView {
             tiling_enabled: false,
             tiling_last_area: None,
             tiling_drag_split: None,
+            side_tab_close_hits: Vec::new(),
+            side_window_hits: Vec::new(),
         }
     }
     /// Seed `deferred_model_switch` from CLI `-m`. The CLI effort token is
@@ -2322,8 +2328,33 @@ impl AppView {
     fn dev_fps_rows(&self) -> u16 {
         0
     }
-    /// Route a scroll delta to the active view.
+    /// Route a scroll delta to the active view (and to the focused side tile when tiled).
     fn dispatch_scroll(&mut self, lines: i32, column: u16, row: u16) {
+        // When tiling is active and a side tile is focused, scroll must go to that side's AgentView.
+        if (self.tiling_enabled || self.window_manager.tiling_enabled)
+            && self
+                .window_manager
+                .focused_window()
+                .is_some_and(|w| w.side_chat_id.is_some())
+        {
+            if let Some(sid) = self
+                .window_manager
+                .focused_window()
+                .and_then(|w| w.side_chat_id.clone())
+                .and_then(|sid| self.side_chats.get(&sid).and_then(|c| c.agent_id))
+            {
+                if let Some(agent) = self.agents.get_mut(&sid) {
+                    if let Some(child_sid) = agent.active_subagent.clone()
+                        && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+                    {
+                        child.handle_scroll(lines, column, row);
+                        return;
+                    }
+                    agent.handle_scroll(lines, column, row);
+                    return;
+                }
+            }
+        }
         match self.active_view {
             ActiveView::Agent(id) => {
                 if let Some(agent) = self.agents.get_mut(&id) {
@@ -2495,27 +2526,45 @@ impl AppView {
                     | MouseEventKind::Up(MouseButton::Left)
                     | MouseEventKind::Moved
             );
-            // Tiling divisor drag: use last draw area for accurate hit-test + ratio mapping.
+            // Tiling divisor drag + click-to-focus + [X] close: use last draw area for accurate hit-test.
             if self.tiling_enabled || self.window_manager.tiling_enabled {
                 if let Some(area) = self.tiling_last_area {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            // [X] close hit (tab header) takes priority over split drag / focus.
+                            for (hit_rect, side_id) in self.side_tab_close_hits.clone() {
+                                if hit_rect.contains((mouse.column, mouse.row).into()) {
+                                    return InputOutcome::Action(Action::CloseSideChat { id: side_id });
+                                }
+                            }
+                            // Split drag?
                             if let Some(idx) = self.window_manager.hit_test_split(area, mouse.column) {
                                 self.tiling_drag_split = Some(idx);
-                                // Mark dragging on that split for visual feedback
                                 if let Some(s) = self.window_manager.splits.get_mut(idx) {
                                     s.dragging = true;
                                 }
                                 return InputOutcome::Changed;
                             }
+                            // Click-to-focus: hit a window rect?
+                            for (hit_rect, win_id) in self.side_window_hits.clone() {
+                                if hit_rect.contains((mouse.column, mouse.row).into()) {
+                                    self.window_manager.focus(&win_id);
+                                    // Sync side_chats.active_id when focusing a side window
+                                    if let Some(win) = self.window_manager.windows.iter().find(|w| w.id == win_id) {
+                                        if let Some(sid) = &win.side_chat_id {
+                                            let _ = self.side_chats.switch(sid);
+                                        }
+                                    }
+                                    let _ = crate::views::window_manager::persist::save(&self.window_manager);
+                                    return InputOutcome::Changed;
+                                }
+                            }
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
-                            // Only drag if we previously hit a divisor or dragging was active.
                             let should_drag = self.tiling_drag_split.is_some()
                                 || self.window_manager.splits.iter().any(|s| s.dragging);
                             if should_drag || self.window_manager.is_tiled() {
                                 self.window_manager.handle_drag(area, mouse.column);
-                                // Ensure the correctly-hit split is marked dragging even if handle_drag defaults to splits[0]
                                 if let Some(idx) = self.tiling_drag_split {
                                     if let Some(s) = self.window_manager.splits.get_mut(idx) {
                                         s.dragging = true;
@@ -2531,7 +2580,6 @@ impl AppView {
                         _ => {}
                     }
                 } else {
-                    // Fallback when we haven't drawn yet: use proxy area (still clamps correctly)
                     match mouse.kind {
                         MouseEventKind::Drag(MouseButton::Left) => {
                             let proxy_area = ratatui::layout::Rect::new(0, 0, 120, 24);
@@ -2825,23 +2873,37 @@ impl AppView {
                 if let Some(outcome) = self.voice_esc_outcome(key_event) {
                     return outcome;
                 }
-                // Tiling keyboard: Ctrl+Tab cycle focus, Ctrl+←/→ resize (even when tiling flag is on, before agent handles it)
+                // Tiling keyboard: Ctrl+Tab cycle focus, Alt+Tab/Alt+←→ fallback, Ctrl/Alt+←/→ resize
                 if self.tiling_enabled || self.window_manager.tiling_enabled {
                     if let Event::Key(key) = ev
                         && key.kind != KeyEventKind::Release
                     {
-                        // Ctrl+Tab (also Ctrl+Shift+Tab via BackTab) cycles focus
                         let is_ctrl_tab = (key.code == KeyCode::Tab || key.code == KeyCode::BackTab)
                             && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
-                        if is_ctrl_tab && self.window_manager.windows.len() > 1 {
+                        let is_alt_tab = (key.code == KeyCode::Tab || key.code == KeyCode::BackTab)
+                            && key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+                        if (is_ctrl_tab || is_alt_tab) && self.window_manager.windows.len() > 1 {
                             self.window_manager.cycle_focus();
+                            // Keep side_chats.active_id in sync with window focus so SendPrompt routing follows.
+                            if let Some(w) = self.window_manager.focused_window() {
+                                if let Some(sid) = w.side_chat_id.clone() {
+                                    let _ = self.side_chats.switch(&sid);
+                                } else {
+                                    // Focused main — clear side active so main input works
+                                    // (optional; SendPrompt checks window focus, but keep consistent)
+                                }
+                            }
                             let _ = crate::views::window_manager::persist::save(&self.window_manager);
                             return InputOutcome::Changed;
                         }
-                        // Ctrl+← / Ctrl+→ resize focused split by ±2 (Ctrl+Shift+←/→ by ±10)
+                        // Ctrl+←/→ or Alt+←/→ resize focused split by ±2 (Shift = ±10)
                         let is_ctrl_left_right = matches!(key.code, KeyCode::Left | KeyCode::Right)
                             && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
-                        if is_ctrl_left_right && !self.window_manager.splits.is_empty() {
+                        let is_alt_left_right = matches!(key.code, KeyCode::Left | KeyCode::Right)
+                            && key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
+                        if (is_ctrl_left_right || is_alt_left_right)
+                            && !self.window_manager.splits.is_empty()
+                        {
                             let shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
                             let base: i32 = if shift { 10 } else { 2 };
                             let delta = if key.code == KeyCode::Left { -(base) } else { base };
@@ -2849,6 +2911,67 @@ impl AppView {
                             let _ = crate::views::window_manager::persist::save(&self.window_manager);
                             return InputOutcome::Changed;
                         }
+                    }
+                }
+                // When tiling is active, route input to the FOCUSED window's AgentView.
+                // Main stays at ActiveView::Agent(id); sides are looked up via window_manager focus.
+                let tiled_side_focused = (self.tiling_enabled || self.window_manager.tiling_enabled)
+                    && self
+                        .window_manager
+                        .focused_window()
+                        .is_some_and(|w| w.side_chat_id.is_some());
+                if tiled_side_focused {
+                    // Resolve focused side AgentId
+                    let focused_side_aid = self
+                        .window_manager
+                        .focused_window()
+                        .and_then(|w| w.side_chat_id.clone())
+                        .and_then(|sid| self.side_chats.get(&sid).and_then(|c| c.agent_id));
+                    if let Some(sid) = focused_side_aid {
+                        // Voice interim + minimal intercept still apply
+                        if let Event::Key(key) = ev
+                            && key.kind != KeyEventKind::Release
+                        {
+                            self.maybe_commit_voice_interim_before_submit_key(key);
+                        }
+                        if self.screen_mode.is_minimal()
+                            && let Event::Key(key) = ev
+                            && key.kind != KeyEventKind::Release
+                            && let Some(outcome) = self.minimal_key_intercept(key)
+                        {
+                            return outcome;
+                        }
+                        let outcome = match self.agents.get_mut(&sid) {
+                            Some(agent) => {
+                                let transcript_before = agent.active_subagent.clone();
+                                let workflows_before = agent.show_workflows;
+                                let outcome = if self.screen_mode.is_minimal() {
+                                    agent.handle_minimal_input(ev, &self.registry)
+                                } else {
+                                    // Prompt paging is a pure input wrapper; safe for sides.
+                                    agent.handle_input_with_prompt_paging(ev, &self.registry)
+                                };
+                                let transcript_opened = transcript_before.is_none()
+                                    && agent.active_subagent.is_some();
+                                let workflows_opened = !workflows_before && agent.show_workflows;
+                                if let Event::Key(key) = ev {
+                                    agent.record_input(key, &outcome);
+                                }
+                                self.pending_effects.append(&mut agent.pending_effects);
+                                if transcript_opened || workflows_opened {
+                                    self.scroll_state.cancel_stream();
+                                    self.last_scroll_pos = None;
+                                }
+                                outcome
+                            }
+                            None => InputOutcome::Unchanged,
+                        };
+                        if self.pending_editor.is_some()
+                            && matches!(outcome, InputOutcome::Action(Action::EditPromptExternal))
+                        {
+                            return InputOutcome::Unchanged;
+                        }
+                        return outcome;
                     }
                 }
                 if let Event::Key(key) = ev
@@ -4903,9 +5026,18 @@ impl AppView {
                         }
                         // Remember area for accurate mouse drag hit-testing next frame.
                         self.tiling_last_area = Some(view_area);
+                        // Tiling: side tiles are full AgentView clones (true copy of main chat system)
+                        // Keep focused side cursor/post to return instead of main when side focused
+                        let mut tiled_side_cursor: Option<(u16, u16)> = None;
+                        let mut tiled_side_post: Option<crate::terminal::overlay::PostFlush> = None;
+                        let mut tiled_extra_posts: Vec<Option<crate::terminal::overlay::PostFlush>> = Vec::new();
                         // Tiling draw path (behind flag): if enabled and >1 visible windows, render tiled boxes + minimized pills.
                         // When tiled, each AgentView draws into its tile; single visible window falls back to normal layout (no regression).
                         let tiled = self.tiling_enabled && self.window_manager.is_tiled();
+                        // Compute tiled rects once (used by both side-draw and main agent_area_eff below)
+                        let tiled_rects: Option<Vec<ratatui::layout::Rect>> = if tiled {
+                            Some(self.window_manager.compute_tiled_layout(view_area))
+                        } else { None };
                         if tiled {
                             let focused_id = self
                                 .window_manager
@@ -4920,179 +5052,91 @@ impl AppView {
                                 self.window_manager
                                     .draw_minimized_pills(view_area, f.buffer_mut());
                             }
-                            // Side panes: render actual side-chat transcript (Cursor-faithful) instead of static placeholder.
-                            // Main tile (idx 0) hosts the full AgentView; extra tiles are side chats with real content.
-                            let rects = self.window_manager.compute_tiled_layout(view_area);
+                            // Side panes: FULL CLONE of main chat system — each side's AgentView draws into its tile.
+                            // Previous placeholder transcript has been removed: tiles are real AgentViews with full interaction.
+                            let rects_ref: &[ratatui::layout::Rect] = tiled_rects.as_deref().unwrap_or(&[]);
                             let visible: Vec<_> = self
                                 .window_manager
                                 .visible_windows()
                                 .iter()
-                                .map(|w| (w.id.clone(), w.title.clone()))
+                                .map(|w| (w.id.clone(), w.title.clone(), w.side_chat_id.clone()))
                                 .collect();
-                            if rects.len() > 1 && visible.len() > 1 {
-                                for (idx, (_win_id, title)) in visible.iter().enumerate().skip(1) {
-                                    if idx >= rects.len() {
-                                        break;
+                            // Hit rects for click-to-focus and archivable [X] (true clone keeps window chrome identical)
+                            self.side_window_hits.clear();
+                            self.side_tab_close_hits.clear();
+                            for (idx2, (win_id2, _title2, side_opt2)) in visible.iter().enumerate() {
+                                if idx2 >= rects_ref.len() { break; }
+                                let rr = rects_ref[idx2];
+                                self.side_window_hits.push((rr, win_id2.clone()));
+                                if let Some(sid) = side_opt2 {
+                                    if rr.width >= 5 {
+                                        let cr = ratatui::layout::Rect::new(rr.x + rr.width.saturating_sub(3), rr.y, 3, 1);
+                                        self.side_tab_close_hits.push((cr, sid.clone()));
                                     }
-                                    let r = rects[idx];
-                                    if r.width < 6 || r.height < 5 {
-                                        continue;
-                                    }
-                                    let inner = ratatui::widgets::Block::default()
-                                        .borders(ratatui::widgets::Borders::ALL)
-                                        .border_type(ratatui::widgets::BorderType::Rounded)
-                                        .inner(r);
-                                    if inner.width < 4 || inner.height < 3 {
-                                        continue;
-                                    }
-                                    // Resolve side chat if this window is a side:
-                                    let side_id_opt = title.strip_prefix("side:").map(|s| s.to_string());
-                                    if let Some(side_id) = side_id_opt {
-                                        if let Some(chat) = self.side_chats.get(&side_id) {
-                                            let header = " New Side Chat ";
-                                            let header_style = ratatui::style::Style::default()
-                                                .fg(ratatui::style::Color::Yellow)
-                                                .add_modifier(ratatui::style::Modifier::BOLD);
-                                            let hdr_x = inner.x;
-                                            let hdr_y = inner.y;
-                                            for (i, ch) in header.chars().enumerate() {
-                                                if hdr_x + i as u16 >= inner.x + inner.width {
-                                                    break;
-                                                }
-                                                if let Some(cell) =
-                                                    f.buffer_mut().cell_mut((hdr_x + i as u16, hdr_y))
-                                                {
-                                                    cell.set_char(ch);
-                                                    cell.set_style(header_style);
-                                                }
-                                            }
-                                            // Turn count badge top-right
-                                            let badge = format!(
-                                                " {} turn{} ",
-                                                chat.turn_count,
-                                                if chat.turn_count == 1 { "" } else { "s" }
+                                }
+                            }
+                            // Every side tiling is a FULL copy of the main chat system:
+                            // each side's AgentView draws into its tile's inner area (same draw() as main).
+                            let focused_win_id2 = focused_id.clone();
+                            let mut side_posts: Vec<Option<crate::terminal::overlay::PostFlush>> = Vec::new();
+                            for (idx, (win_id, _title, side_id_opt)) in visible.iter().enumerate().skip(1) {
+                                if idx >= rects_ref.len() { break; }
+                                let r = rects_ref[idx];
+                                if r.width < 10 || r.height < 6 { continue; }
+                                if let Some(side_id) = side_id_opt {
+                                    if let Some(sid) = self.side_chats.get(side_id).and_then(|c| c.agent_id) {
+                                        let inner = ratatui::widgets::Block::default()
+                                            .borders(ratatui::widgets::Borders::ALL)
+                                            .border_type(ratatui::widgets::BorderType::Rounded)
+                                            .inner(r);
+                                        if inner.width < 6 || inner.height < 4 { continue; }
+                                        let side_banner = crate::app::agent_view::BannerSlotParams {
+                                            height: 0,
+                                            announcements: &[],
+                                            hidden_ids: &self.hidden_announcement_ids,
+                                            privacy_banner: false,
+                                            mouse_pos: agent_mouse_pos,
+                                            tip: None,
+                                        };
+                                        if let Some(side_agent) = agents.get_mut(&sid) {
+                                            let is_focused = focused_win_id2.as_deref() == Some(win_id.as_str());
+                                            let (c, p) = side_agent.draw(
+                                                inner,
+                                                f.buffer_mut(),
+                                                registry,
+                                                scratch,
+                                                pending_hint,
+                                                false,
+                                                side_banner,
+                                                &self.bundle_state,
+                                                false,
+                                                false,
+                                                link_spans,
+                                                AppRenderParams {
+                                                    voice_available,
+                                                    voice_listening: false,
+                                                    voice_interim: None,
+                                                    esc_owned_before_agent: false,
+                                                },
                                             );
-                                            let badge_style = ratatui::style::Style::default()
-                                                .fg(ratatui::style::Color::Cyan);
-                                            let bx = inner
-                                                .x
-                                                .saturating_add(
-                                                    inner.width.saturating_sub(badge.len() as u16 + 1),
-                                                );
-                                            if bx > inner.x {
-                                                for (i, ch) in badge.chars().enumerate() {
-                                                    if let Some(cell) =
-                                                        f.buffer_mut().cell_mut((bx + i as u16, hdr_y))
-                                                    {
-                                                        cell.set_char(ch);
-                                                        cell.set_style(badge_style);
-                                                    }
-                                                }
+                                            if is_focused {
+                                                tiled_side_cursor = c;
+                                                tiled_side_post = p;
+                                            } else {
+                                                side_posts.push(p);
                                             }
-                                            // Body: transcript lines wrapped.
-                                            let body_y = inner.y + 1;
-                                            let body_h = inner.height.saturating_sub(3);
-                                            let body_w = inner.width;
-                                            if body_h > 0 && body_w > 0 {
-                                                let raw = if chat.transcript.is_empty() {
-                                                    "Escribe tu pregunta y presiona Enter.\n\nConversacion independiente del chat principal (hereda contexto oculto).".to_string()
-                                                } else {
-                                                    let mut out = String::new();
-                                                    for (i, block) in chat.transcript.iter().enumerate() {
-                                                        let txt = match block {
-                                                            agent_client_protocol::ContentBlock::Text(t) => {
-                                                                t.text.clone()
-                                                            }
-                                                            other => format!("{other:?}"),
-                                                        };
-                                                        if i > 0 {
-                                                            out.push_str("\n\n");
-                                                        }
-                                                        out.push_str(&txt);
-                                                    }
-                                                    out
-                                                };
-                                                let style_body = ratatui::style::Style::default()
-                                                    .fg(ratatui::style::Color::White);
-                                                let mut line_idx: u16 = 0;
-                                                for para in raw.split('\n') {
-                                                    if line_idx >= body_h {
-                                                        break;
-                                                    }
-                                                    if para.is_empty() {
-                                                        line_idx += 1;
-                                                        continue;
-                                                    }
-                                                    let chars: Vec<char> = para.chars().collect();
-                                                    let mut off = 0;
-                                                    while off < chars.len() && line_idx < body_h {
-                                                        let end =
-                                                            (off + body_w as usize).min(chars.len());
-                                                        let slice: String =
-                                                            chars[off..end].iter().collect();
-                                                        for (ci, ch) in slice.chars().enumerate() {
-                                                            if let Some(cell) = f.buffer_mut().cell_mut((
-                                                                inner.x + ci as u16,
-                                                                body_y + line_idx,
-                                                            )) {
-                                                                cell.set_char(ch);
-                                                                cell.set_style(style_body);
-                                                            }
-                                                        }
-                                                        off = end;
-                                                        line_idx += 1;
-                                                        if line_idx >= body_h {
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            // Footer hint at bottom of inner
-                                            let footer_y = inner.y + inner.height - 1;
-                                            if footer_y > inner.y + 1 {
-                                                let hint =
-                                                    " Send follow-up   Ctrl+Tab foco   Ctrl+<-/-> ancho   drag | ";
-                                                let hint_style = ratatui::style::Style::default()
-                                                    .fg(ratatui::style::Color::DarkGray);
-                                                let div_y = footer_y.saturating_sub(1);
-                                                for x in inner.x..inner.x + inner.width {
-                                                    if let Some(cell) =
-                                                        f.buffer_mut().cell_mut((x, div_y))
-                                                    {
-                                                        cell.set_char('\u{2500}');
-                                                        cell.set_style(hint_style);
-                                                    }
-                                                }
-                                                let truncated: String = hint
-                                                    .chars()
-                                                    .take(inner.width as usize)
-                                                    .collect();
-                                                for (i, ch) in truncated.chars().enumerate() {
-                                                    if let Some(cell) = f.buffer_mut()
-                                                        .cell_mut((inner.x + i as u16, footer_y))
-                                                    {
-                                                        cell.set_char(ch);
-                                                        cell.set_style(hint_style);
-                                                    }
-                                                }
-                                            }
-                                            continue;
                                         }
-                                    }
-                                    // Fallback generic placeholder for non-side tiles
-                                    if inner.width >= 6 && inner.height >= 1 {
-                                        let placeholder = format!(
-                                            "{} \u{2014} placeholder",
-                                            if title.is_empty() { _win_id } else { title }
-                                        );
-                                        let style = ratatui::style::Style::default()
-                                            .fg(ratatui::style::Color::DarkGray);
-                                        let truncated: String =
-                                            placeholder.chars().take(inner.width as usize).collect();
+                                    } else {
+                                        // No AgentView yet — fallback minimal placeholder (should not happen after CreateSideChat)
+                                        let inner = ratatui::widgets::Block::default()
+                                            .borders(ratatui::widgets::Borders::ALL)
+                                            .border_type(ratatui::widgets::BorderType::Rounded)
+                                            .inner(r);
+                                        let placeholder = format!("{} \u{2014} loading", _title);
+                                        let style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
+                                        let truncated: String = placeholder.chars().take(inner.width as usize).collect();
                                         for (i, ch) in truncated.chars().enumerate() {
-                                            if let Some(cell) =
-                                                f.buffer_mut().cell_mut((inner.x + i as u16, inner.y))
-                                            {
+                                            if let Some(cell) = f.buffer_mut().cell_mut((inner.x + i as u16, inner.y)) {
                                                 cell.set_char(ch);
                                                 cell.set_style(style);
                                             }
@@ -5100,6 +5144,7 @@ impl AppView {
                                     }
                                 }
                             }
+                            tiled_extra_posts = side_posts;
                         }
                         if let Some(agent) = agents.get_mut(&id) {
                             let announcement_banner_h =
@@ -5193,12 +5238,26 @@ impl AppView {
                             {
                                 link_spans.clear();
                             }
-                            let cursor = if has_cloud || self.tutorial.is_some() {
-                                None
+                            let is_side_focused = tiled
+                                && self
+                                    .window_manager
+                                    .focused_window()
+                                    .is_some_and(|w| w.side_chat_id.is_some());
+                            let effective_cursor = if is_side_focused {
+                                tiled_side_cursor.or(cursor_pos)
                             } else {
                                 cursor_pos
                             };
-                            return (cursor, Self::merge_escapes(notif_escapes, post_flush));
+                            let cursor = if has_cloud || self.tutorial.is_some() {
+                                None
+                            } else {
+                                effective_cursor
+                            };
+                            let mut merged_post = Self::merge_post_flush(post_flush, tiled_side_post);
+                            for pp in tiled_extra_posts.into_iter() {
+                                merged_post = Self::merge_post_flush(merged_post, pp);
+                            }
+                            return (cursor, Self::merge_escapes(notif_escapes, merged_post));
                         }
                     }
                     ActiveView::AgentDashboard => {

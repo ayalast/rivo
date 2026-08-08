@@ -63,6 +63,9 @@ pub struct Window {
     /// Optional title (e.g., agent session id or side-chat id).
     #[serde(default)]
     pub title: String,
+    /// Linked side chat id, if this window hosts a side chat.
+    #[serde(default)]
+    pub side_chat_id: Option<String>,
     /// Whether minimized (collapsed in sidebar, not rendered as tile).
     #[serde(default)]
     pub minimized: bool,
@@ -77,6 +80,18 @@ impl Window {
         Self {
             id: id.into(),
             title: title.into(),
+            side_chat_id: None,
+            minimized: false,
+            rect: Rect::default(),
+        }
+    }
+
+    /// Create a new window for a side chat.
+    pub fn new_for_side(id: impl Into<String>, title: impl Into<String>, side_id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            side_chat_id: Some(side_id.into()),
             minimized: false,
             rect: Rect::default(),
         }
@@ -143,6 +158,20 @@ impl WindowManager {
     pub fn add_window(&mut self, title: impl Into<String>) -> WindowId {
         let id = format!("win-{}", uuid::Uuid::new_v4());
         let win = Window::new(id.clone(), title);
+        self.windows.push(win);
+        self.focused = self.windows.len().saturating_sub(1);
+        self.rebuild_splits();
+        id
+    }
+
+    /// Add a new window hosting a side chat. Title is friendly label ("Side 1").
+    pub fn add_side_window(
+        &mut self,
+        title: impl Into<String>,
+        side_id: impl Into<String>,
+    ) -> WindowId {
+        let id = format!("win-{}", uuid::Uuid::new_v4());
+        let win = Window::new_for_side(id.clone(), title, side_id);
         self.windows.push(win);
         self.focused = self.windows.len().saturating_sub(1);
         self.rebuild_splits();
