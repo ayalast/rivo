@@ -989,6 +989,7 @@ pub(crate) async fn spawn_session_actor(
         blocking_wait_depth: tool_context.blocking_wait_depth.clone(),
         respect_gitignore,
         path_not_found_hints,
+        ask_mode: false,
         scheduler_background_loops,
         mcp_state: mcp_state.clone(),
         managed_gateway_tool_client: managed_gateway_tool_client.clone(),

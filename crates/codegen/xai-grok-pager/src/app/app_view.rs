@@ -1307,6 +1307,13 @@ impl AppView {
             }
         }
     }
+    /// Helper to get active agent id if in Agent view.
+    pub fn active_view_agent_id(&self) -> Option<crate::app::agent::AgentId> {
+        match self.active_view {
+            ActiveView::Agent(id) => Some(id),
+            _ => None,
+        }
+    }
     /// Whether deferred session-startup actions may run: both auth AND folder
     /// trust must be resolved. Mirrors the auth gate at the session-creating
     /// startup sites; trust is gated AFTER auth so a pending trust question

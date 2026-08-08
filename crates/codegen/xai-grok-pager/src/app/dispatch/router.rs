@@ -1040,6 +1040,67 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowPlan => dispatch_show_plan(app),
         Action::EnterPlanMode { description } => dispatch_enter_plan_mode(app, description),
         Action::SetPlanMode(kind) => set_plan_mode(app, kind),
+        Action::SetAgentMode(mode) => {
+            let curr = app.agents.get(&app.active_view_agent_id().unwrap_or(crate::app::agent::AgentId(0)))
+                .map(|a| a.agent_mode)
+                .unwrap_or(crate::app::agent_mode::AgentMode::Normal);
+            if curr == mode {
+                if let Some(id) = app.active_view_agent_id() {
+                    if let Some(agent) = app.agents.get_mut(&id) {
+                        agent.show_mode_switch_banner(mode.label());
+                    }
+                }
+                return vec![];
+            }
+            if let Some(id) = app.active_view_agent_id() {
+                if let Some(agent) = app.agents.get_mut(&id) {
+                    agent.agent_mode = mode;
+                    agent.show_mode_switch_banner(mode.label());
+                }
+                let session_id = app.agents.get(&id).and_then(|a| a.session.session_id.clone());
+                if let Some(sid) = session_id {
+                    match mode {
+                        crate::app::agent_mode::AgentMode::Plan => {
+                            if let Some(agent) = app.agents.get_mut(&id) {
+                                agent.plan_mode_pending = Some(true);
+                            }
+                            return vec![Effect::SetSessionMode { session_id: sid, mode_id: agent_client_protocol::SessionModeId::new(xai_grok_tools::types::SessionMode::Plan.as_id()) }];
+                        }
+                        crate::app::agent_mode::AgentMode::Ask => {
+                            if curr == crate::app::agent_mode::AgentMode::Plan {
+                                if let Some(agent) = app.agents.get_mut(&id) { agent.plan_mode_pending = Some(false); }
+                            }
+                            return vec![Effect::SetSessionMode { session_id: sid, mode_id: agent_client_protocol::SessionModeId::new(xai_grok_tools::types::SessionMode::Ask.as_id()) }];
+                        }
+                        _ if curr == crate::app::agent_mode::AgentMode::Plan || curr == crate::app::agent_mode::AgentMode::Ask => {
+                            if curr == crate::app::agent_mode::AgentMode::Plan {
+                                if let Some(agent) = app.agents.get_mut(&id) { agent.plan_mode_pending = Some(false); }
+                            }
+                            return vec![Effect::SetSessionMode { session_id: sid, mode_id: agent_client_protocol::SessionModeId::new(xai_grok_tools::types::SessionMode::Default.as_id()) }];
+                        }
+                        _ => {}
+                    }
+                } else {
+                    if let Some(agent) = app.agents.get_mut(&id) {
+                        match mode {
+                            crate::app::agent_mode::AgentMode::Plan => {
+                                agent.plan_mode_pending = Some(true);
+                                agent.deferred_session_mode = Some(xai_grok_tools::types::SessionMode::Plan);
+                            }
+                            crate::app::agent_mode::AgentMode::Ask => {
+                                if curr == crate::app::agent_mode::AgentMode::Plan { agent.plan_mode_pending = Some(false); }
+                                agent.deferred_session_mode = Some(xai_grok_tools::types::SessionMode::Ask);
+                            }
+                            _ => {
+                                if curr == crate::app::agent_mode::AgentMode::Plan { agent.plan_mode_pending = Some(false); }
+                                agent.deferred_session_mode = None;
+                            }
+                        }
+                    }
+                }
+            }
+            vec![]
+        }
         Action::OpenFeedbackPane => dispatch_open_feedback_pane(app),
         Action::SendFeedback(text) => dispatch_send_feedback(app, text),
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
