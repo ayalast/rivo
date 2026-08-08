@@ -705,6 +705,12 @@ pub enum Action {
     /// to config.toml). `/plan <desc>` uses `EnterPlanMode` instead
     /// because it also starts a turn.
     SetPlanMode(PlanModeKind),
+    /// Set rivo agent mode (Ask/Debug/Multitask/Normal/Plan).
+    /// For Plan, equivalent to SetPlanMode(On); for others, flips
+    /// `agent.agent_mode`, shows the mode-switch banner, and when
+    /// `Ask` also emits `SetSessionMode("ask")` so the shell
+    /// re-filters the toolset without a restart.
+    SetAgentMode(crate::app::agent_mode::AgentMode),
     /// Open the freeform feedback bottom pane (bare `/feedback`).
     OpenFeedbackPane,
     /// Submit feedback text (inline `/feedback <text>` or pane submit).
@@ -728,6 +734,10 @@ pub enum Action {
     CloseSideChat { id: String },
     /// Send follow-up text to a side chat (append transcript, bump turn_count).
     SendSideChat { id: String, text: String },
+    /// Toggle tiling layout on/off. When enabling, ensures at least one window exists.
+    ToggleTiling,
+    /// Enable or disable tiling explicitly.
+    SetTiling(bool),
     /// Request a session recap ("where was I" summary). `auto` is `true` for
     /// the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).

@@ -410,6 +410,103 @@ impl WindowManager {
     }
 }
 
+pub mod persist {
+    //! Persistence for `WindowManager` — `~/.rivo/windows.json` (atomic write).
+    //!
+    //! Uses the same `rivo_home()` resolution pattern as `side_chat::persist`.
+
+    use std::path::{Path, PathBuf};
+
+    use super::WindowManager;
+
+    /// Path for the windows layout file.
+    pub fn windows_path() -> PathBuf {
+        crate::app::side_chat::persist::rivo_home().join("windows.json")
+    }
+
+    /// Compatibility path (grok home fallback for migration reads).
+    pub fn grok_windows_path() -> PathBuf {
+        xai_grok_config::grok_home().join("windows.json")
+    }
+
+    /// Load `WindowManager` from disk. Returns default (tiling off) if missing/invalid.
+    pub fn load() -> WindowManager {
+        load_at(&windows_path())
+    }
+
+    fn load_at(path: &Path) -> WindowManager {
+        let data = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let grok_path = grok_windows_path();
+                if grok_path != path {
+                    if let Ok(s) = std::fs::read_to_string(&grok_path) {
+                        return parse(&s);
+                    }
+                }
+                return WindowManager::default();
+            }
+            Err(_) => return WindowManager::default(),
+        };
+        parse(&data)
+    }
+
+    fn parse(data: &str) -> WindowManager {
+        serde_json::from_str(data).unwrap_or_default()
+    }
+
+    /// Persist `WindowManager` atomically (temp file + rename).
+    pub fn save(wm: &WindowManager) -> std::io::Result<()> {
+        save_at(wm, &windows_path())
+    }
+
+    fn save_at(wm: &WindowManager, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_string_pretty(wm)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, data)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{load_at, save_at};
+        use crate::views::window_manager::WindowManager;
+        use tempfile::TempDir;
+
+        #[test]
+        fn roundtrip_via_temp_path() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("windows.json");
+            let mut wm = WindowManager::new().with_tiling(true);
+            wm.add_window("test");
+            save_at(&wm, &path).unwrap();
+            let loaded = load_at(&path);
+            assert_eq!(loaded.windows.len(), 1);
+            assert!(loaded.tiling_enabled);
+        }
+
+        #[test]
+        fn missing_file_yields_default() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("nonexistent.json");
+            let wm = load_at(&path);
+            assert!(wm.windows.is_empty());
+            assert!(!wm.tiling_enabled);
+        }
+
+        #[test]
+        fn tiling_off_by_default_after_load_failure() {
+            let wm = super::parse("not-json");
+            assert!(!wm.tiling_enabled);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Split, WindowManager};

@@ -666,20 +666,41 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
     let entering_plan = next == crate::app::agent_mode::AgentMode::Plan;
     let leaving_plan = curr == crate::app::agent_mode::AgentMode::Plan
         && next != crate::app::agent_mode::AgentMode::Plan;
+    // rivo: Ask mid-session — track Ask transitions to re-filter toolset without restart
+    let entering_ask = next == crate::app::agent_mode::AgentMode::Ask;
+    let leaving_ask =
+        curr == crate::app::agent_mode::AgentMode::Ask && next != crate::app::agent_mode::AgentMode::Ask;
 
     let session_id = agent.session.session_id.clone();
 
     if let Some(sid) = session_id {
         // Active session path
+        // rivo: Ask mid-session — entering Ask/Plan must notify shell via SetSessionMode so the
+        // toolset can be re-finalized (ask allowlist) or plan gate re-armed without restarting session
         if entering_plan {
             agent.plan_mode_pending = Some(true);
             agent.show_mode_switch_banner(banner_label);
             refresh_open_settings_modals(app);
-            tracing::info!("Mode cycle: Normal → Plan");
+            tracing::info!("Mode cycle: {} → Plan", curr.label());
             return vec![Effect::SetSessionMode {
                 session_id: sid,
                 mode_id: acp::SessionModeId::new(
                     xai_grok_tools::types::SessionMode::Plan.as_id(),
+                ),
+            }];
+        }
+        if entering_ask {
+            // Leaving Plan -> Ask: clear optimistic plan pending, then enter Ask
+            if curr == crate::app::agent_mode::AgentMode::Plan {
+                agent.plan_mode_pending = Some(false);
+            }
+            agent.show_mode_switch_banner(banner_label);
+            refresh_open_settings_modals(app);
+            tracing::info!("Mode cycle: {} → Ask (mid-session re-filter)", curr.label());
+            return vec![Effect::SetSessionMode {
+                session_id: sid,
+                mode_id: acp::SessionModeId::new(
+                    xai_grok_tools::types::SessionMode::Ask.as_id(),
                 ),
             }];
         }
@@ -695,25 +716,49 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                 ),
             }];
         }
-        // Non-Plan transitions: only agent_mode + banner
+        if leaving_ask {
+            agent.show_mode_switch_banner(banner_label);
+            refresh_open_settings_modals(app);
+            tracing::info!("Mode cycle: Ask → {} (re-enable tools)", banner_label);
+            return vec![Effect::SetSessionMode {
+                session_id: sid,
+                mode_id: acp::SessionModeId::new(
+                    xai_grok_tools::types::SessionMode::Default.as_id(),
+                ),
+            }];
+        }
+        // Non-Plan/Ask transitions (Debug/Multitask/Normal): only agent_mode + banner
         agent.show_mode_switch_banner(banner_label);
         refresh_open_settings_modals(app);
         tracing::info!("Mode cycle: {} → {}", curr.label(), banner_label);
         Vec::new()
     } else {
-        // Pre-session path — no ACP session yet. Mirror Plan staging via
+        // Pre-session path — no ACP session yet. Mirror Plan/Ask staging via
         // deferred_session_mode so handle_session_created can replay it.
+        // rivo: Ask mid-session — deferred mode ensures next session starts with Ask allowlist
         if entering_plan {
             agent.plan_mode_pending = Some(true);
             agent.deferred_session_mode =
                 Some(xai_grok_tools::types::SessionMode::Plan);
             agent.show_mode_switch_banner(banner_label);
-            tracing::info!("Mode cycle (pre-session): Normal → Plan");
+            tracing::info!("Mode cycle (pre-session): {} → Plan", curr.label());
+        } else if entering_ask {
+            if curr == crate::app::agent_mode::AgentMode::Plan {
+                agent.plan_mode_pending = Some(false);
+            }
+            agent.deferred_session_mode =
+                Some(xai_grok_tools::types::SessionMode::Ask);
+            agent.show_mode_switch_banner(banner_label);
+            tracing::info!("Mode cycle (pre-session): {} → Ask", curr.label());
         } else if leaving_plan {
             agent.plan_mode_pending = Some(false);
             agent.deferred_session_mode = None;
             agent.show_mode_switch_banner(banner_label);
             tracing::info!("Mode cycle (pre-session): Plan → {}", banner_label);
+        } else if leaving_ask {
+            agent.deferred_session_mode = None;
+            agent.show_mode_switch_banner(banner_label);
+            tracing::info!("Mode cycle (pre-session): Ask → {}", banner_label);
         } else {
             agent.show_mode_switch_banner(banner_label);
             tracing::info!(

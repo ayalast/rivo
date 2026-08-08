@@ -102,6 +102,9 @@ pub struct AgentBuilder {
     subagents_enabled: bool,
     background_workflows_enabled: bool,
     ask_user_question_enabled: bool,
+    // rivo: Ask mid-session — when true the Agent's toolset is filtered to read-only (is_read_only)
+    // via SessionContext.ask_mode; shell also gates mutating calls and rebuilds harness on toggle
+    ask_mode: bool,
     subagent_toggle: HashMap<String, bool>,
     task_model_slugs: Vec<String>,
     skills_config: crate::prompt::skills::SkillsConfig,
@@ -243,6 +246,7 @@ impl AgentBuilder {
             subagents_enabled: false,
             background_workflows_enabled: false,
             ask_user_question_enabled: true,
+            ask_mode: false,
             subagent_toggle: HashMap::new(),
             task_model_slugs: Vec::new(),
             skills_config: Default::default(),
@@ -575,6 +579,11 @@ impl AgentBuilder {
     /// a kill-switch) and/or the pager's `--no-ask-user` (`_meta.askUserQuestion`).
     pub fn with_ask_user_question_enabled(mut self, enabled: bool) -> Self {
         self.ask_user_question_enabled = enabled;
+        self
+    }
+    /// Enable/disable Ask read-only mode (filters mutating tools).
+    pub fn with_ask_mode(mut self, enabled: bool) -> Self {
+        self.ask_mode = enabled;
         self
     }
     /// Set per-subagent enable/disable toggles from `[subagents.toggle]`.
@@ -1058,7 +1067,7 @@ impl AgentBuilder {
                 auth_provider: None,
                 attribution_callback: self.attribution_callback,
                 system_reminder_tag: self.system_reminder_tag,
-                ask_mode: false,
+                ask_mode: self.ask_mode,
             },
         )
         .await

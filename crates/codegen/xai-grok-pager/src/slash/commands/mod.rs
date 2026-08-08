@@ -57,11 +57,13 @@ pub mod screen_mode_switch;
 pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
+pub mod multitask;
 pub mod share;
 pub mod side;
 pub mod tasks;
 pub mod theme;
 pub mod timeline;
+pub mod tiling;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
@@ -91,6 +93,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(find::FindCommand),
         Arc::new(history::HistoryCommand),
         Arc::new(export::ExportCommand),
+        Arc::new(tiling::TilingCommand),
         Arc::new(transcript::TranscriptCommand),
         Arc::new(edit_prompt::EditPromptCommand),
         Arc::new(expand::ExpandCommand),
@@ -126,6 +129,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(btw::BtwCommand),
         Arc::new(side::SideCommand),
         Arc::new(side::SidesCommand),
+        Arc::new(multitask::MultitaskCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(doctor::DoctorCommand),
         Arc::new(voice::VoiceCommand),

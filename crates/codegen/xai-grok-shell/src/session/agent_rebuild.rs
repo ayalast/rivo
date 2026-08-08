@@ -127,6 +127,8 @@ pub(crate) struct AgentRebuildSpec {
     pub blocking_wait_depth: Arc<crate::tools::tool_context::BlockingWaitState>,
     pub respect_gitignore: bool,
     pub path_not_found_hints: bool,
+    // rivo: Ask mid-session — when true the rebuilt Agent's toolset omits mutating tools
+    pub ask_mode: bool,
     /// Fire side of the scheduler mode. The spawn copies the same resolution
     /// onto [`SessionHandle::scheduler_background_loops`](crate::session::SessionHandle),
     /// which is what clients read — keep the two on one resolve.
@@ -229,6 +231,7 @@ impl AgentRebuildSpec {
             blocking_wait_depth,
             respect_gitignore,
             path_not_found_hints,
+            ask_mode,
             scheduler_background_loops,
             mcp_state,
             managed_gateway_tool_client,
@@ -274,6 +277,7 @@ impl AgentRebuildSpec {
                 .collect::<Vec<_>>(),
         )
         .with_ask_user_question_enabled(*ask_user_question_enabled)
+        .with_ask_mode(*ask_mode)
         .with_persona_summaries(persona_summaries.clone())
         .with_prompt_audience(*prompt_audience)
         .with_role_instructions(role_instructions.clone())
@@ -457,6 +461,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         respect_gitignore: false,
         scheduler_background_loops: true,
         path_not_found_hints: false,
+        ask_mode: false,
         mcp_state: Arc::new(tokio::sync::Mutex::new(
             crate::session::mcp_servers::McpState::new(vec![]),
         )),

@@ -1455,6 +1455,19 @@ pub(crate) async fn run(
             "note": "the toggle chord is scrollback-only; press Tab to focus scrollback first, or use /toggle-mouse-reporting from anywhere",
         })),
     );
+    // Hydrate persisted window layout (optional, tiling stays off by default unless persisted file says on).
+    {
+        let persisted = crate::views::window_manager::persist::load();
+        // Keep default tiling_enabled=false unless persisted file was explicitly saved as enabled and has windows.
+        // Respect persisted flag so `cargo check` users aren't surprised, but also respect AppView default off semantics
+        // by only hydrating if the file actually exists (load returns non-empty or tiling true). Empty default is no-op.
+        if !persisted.windows.is_empty() || persisted.tiling_enabled {
+            app.window_manager = persisted;
+            app.tiling_enabled = app.window_manager.tiling_enabled;
+            // Ensure tiling flag consistency; if persisted says tiling true but we want default off, honor persisted (user opted in).
+            // Default file absent -> both are off already.
+        }
+    }
     let config_session_bools = load_initial_config_session_bools();
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;

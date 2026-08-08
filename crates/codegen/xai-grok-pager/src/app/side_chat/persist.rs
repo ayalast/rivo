@@ -10,9 +10,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-static RIVO_HOME_OVERRIDE: OnceLock<Option<PathBuf>> = OnceLock::new();
+pub(crate) static RIVO_HOME_OVERRIDE: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-fn rivo_home_override() -> Option<PathBuf> {
+pub(crate) fn rivo_home_override() -> Option<PathBuf> {
     RIVO_HOME_OVERRIDE.get().and_then(|v| v.clone())
 }
 

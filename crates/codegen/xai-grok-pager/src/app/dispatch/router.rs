@@ -1148,6 +1148,29 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             vec![]
         }
+        Action::ToggleTiling | Action::SetTiling(_) => {
+            let enable = match action {
+                Action::SetTiling(b) => b,
+                _ => !app.tiling_enabled && !app.window_manager.tiling_enabled,
+            };
+            app.tiling_enabled = enable;
+            app.window_manager.tiling_enabled = enable;
+            if enable && app.window_manager.windows.is_empty() {
+                // Seed a primary window from the active agent session if available, else generic.
+                let title = app
+                    .active_agent()
+                    .and_then(|a| a.session.session_id.as_ref().map(|sid| sid.0.to_string()))
+                    .unwrap_or_else(|| "main".to_string());
+                app.window_manager.add_window(title);
+            }
+            let _ = crate::views::window_manager::persist::save(&app.window_manager);
+            if enable {
+                app.show_toast("Tiling ON — Ctrl+Tab cycle, Ctrl+←/→ resize, drag divider");
+            } else {
+                app.show_toast("Tiling OFF");
+            }
+            return vec![];
+        }
         Action::SendRecap { auto } => dispatch_send_recap(app, auto),
         Action::SetCodingDataSharing { opted_in } => set_coding_data_sharing(
             app,

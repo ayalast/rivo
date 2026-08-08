@@ -1046,6 +1046,35 @@ impl SessionActor {
             }
         };
         let access_kind = AccessKind::from(&tool_input);
+        // rivo: Ask mid-session — shell gate rejects mutating tools while Ask mode is active,
+        // even under YOLO; current_prompt_mode is the durable truth (set via SetSessionMode)
+        let in_ask_mode = *self.current_prompt_mode.lock()
+            == crate::session::plan_mode::PromptMode::Ask;
+        if in_ask_mode {
+            let should_block = matches!(access_kind, AccessKind::Edit(_) | AccessKind::Bash(_))
+                || (matches!(access_kind, AccessKind::MCPTool { .. })
+                    && !self
+                        .agent
+                        .borrow()
+                        .tool_bridge()
+                        .tool_kind(&call.function.name)
+                        .is_some_and(|k| k.is_read_only()));
+            if should_block {
+                tracing::info_span!(
+                    "tool.decision",
+                    tool_name = %call.function.name,
+                    tool_use_id = %call.id,
+                    decision = "deny",
+                    source = "ask_mode",
+                    wait_ms = 0_i64,
+                )
+                .in_scope(|| {});
+                let msg = "Rejected: Ask mode is read-only — edits and terminal commands are blocked. Ask a clarifying question or switch mode.";
+                self.handle_tool_not_executed(&call.id, &tool_call_id, msg.to_string())
+                    .await?;
+                return Ok(Err(ToolLoop::Continue));
+            }
+        }
         let plan_gate = plan_mode_edit_gate(&self.plan_mode.lock(), &tool_input, &access_kind);
         if plan_gate != PlanEditGate::Allow {
             tracing::info_span!(

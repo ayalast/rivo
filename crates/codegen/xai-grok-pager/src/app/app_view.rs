@@ -1227,7 +1227,12 @@ pub struct AppView {
     pub window_manager: crate::views::window_manager::WindowManager,
     /// Whether tiled layout is enabled (feature flag). `false` = single-column
     /// (existing behavior). Do NOT flip to true until tiled draw is wired and QA'd.
+    /// Synced with `window_manager.tiling_enabled` on toggle.
     pub tiling_enabled: bool,
+    /// Last area used for tiling drag calculations (set during draw).
+    pub(crate) tiling_last_area: Option<ratatui::layout::Rect>,
+    /// Optional drag target split index while dragging divider.
+    pub(crate) tiling_drag_split: Option<usize>,
 }
 /// Reshow window elapsed? None/0 = never. Unparseable ack fails open (show).
 fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
@@ -1636,6 +1641,8 @@ impl AppView {
             side_chats: crate::app::side_chat::SideChatStore::new(),
             window_manager: crate::views::window_manager::WindowManager::new(),
             tiling_enabled: false,
+            tiling_last_area: None,
+            tiling_drag_split: None,
         }
     }
     /// Seed `deferred_model_switch` from CLI `-m`. The CLI effort token is
@@ -2481,24 +2488,55 @@ impl AppView {
                     | MouseEventKind::Up(MouseButton::Left)
                     | MouseEventKind::Moved
             );
-            // Tiling divisor drag: update split ratios while tiling flag is on.
-            // Only consume Drag events; Up ends the drag, Moved is hover.
+            // Tiling divisor drag: use last draw area for accurate hit-test + ratio mapping.
             if self.tiling_enabled || self.window_manager.tiling_enabled {
-                match mouse.kind {
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        // Use the view area if we have one; fallback to 120 cols conceptual. We don't have view_area here,
-                        // so infer from last known render area via window_manager state: window_manager.handle_drag expects
-                        // the tiled `area` that compute_tiled_layout was given. Use an approximate area spanning last_mouse pos.
-                        // For now, use a synthetic 0-origin area with width covering last drag; tiling drag clamps to 10..90 so
-                        // any sufficiently wide area works. Use a wide proxy area (x=0,width=120) so x maps to ratio.
-                        let proxy_area = ratatui::layout::Rect::new(0, 0, 120, 24);
-                        self.window_manager.handle_drag(proxy_area, mouse.column);
-                        return InputOutcome::Changed;
+                if let Some(area) = self.tiling_last_area {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some(idx) = self.window_manager.hit_test_split(area, mouse.column) {
+                                self.tiling_drag_split = Some(idx);
+                                // Mark dragging on that split for visual feedback
+                                if let Some(s) = self.window_manager.splits.get_mut(idx) {
+                                    s.dragging = true;
+                                }
+                                return InputOutcome::Changed;
+                            }
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            // Only drag if we previously hit a divisor or dragging was active.
+                            let should_drag = self.tiling_drag_split.is_some()
+                                || self.window_manager.splits.iter().any(|s| s.dragging);
+                            if should_drag || self.window_manager.is_tiled() {
+                                self.window_manager.handle_drag(area, mouse.column);
+                                // Ensure the correctly-hit split is marked dragging even if handle_drag defaults to splits[0]
+                                if let Some(idx) = self.tiling_drag_split {
+                                    if let Some(s) = self.window_manager.splits.get_mut(idx) {
+                                        s.dragging = true;
+                                    }
+                                }
+                                return InputOutcome::Changed;
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            self.window_manager.end_drag();
+                            self.tiling_drag_split = None;
+                        }
+                        _ => {}
                     }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        self.window_manager.end_drag();
+                } else {
+                    // Fallback when we haven't drawn yet: use proxy area (still clamps correctly)
+                    match mouse.kind {
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            let proxy_area = ratatui::layout::Rect::new(0, 0, 120, 24);
+                            self.window_manager.handle_drag(proxy_area, mouse.column);
+                            return InputOutcome::Changed;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            self.window_manager.end_drag();
+                            self.tiling_drag_split = None;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             if is_mouse_action {}
@@ -2779,6 +2817,32 @@ impl AppView {
                 }
                 if let Some(outcome) = self.voice_esc_outcome(key_event) {
                     return outcome;
+                }
+                // Tiling keyboard: Ctrl+Tab cycle focus, Ctrl+←/→ resize (even when tiling flag is on, before agent handles it)
+                if self.tiling_enabled || self.window_manager.tiling_enabled {
+                    if let Event::Key(key) = ev
+                        && key.kind != KeyEventKind::Release
+                    {
+                        // Ctrl+Tab (also Ctrl+Shift+Tab via BackTab) cycles focus
+                        let is_ctrl_tab = (key.code == KeyCode::Tab || key.code == KeyCode::BackTab)
+                            && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+                        if is_ctrl_tab && self.window_manager.windows.len() > 1 {
+                            self.window_manager.cycle_focus();
+                            let _ = crate::views::window_manager::persist::save(&self.window_manager);
+                            return InputOutcome::Changed;
+                        }
+                        // Ctrl+← / Ctrl+→ resize focused split by ±2 (Ctrl+Shift+←/→ by ±10)
+                        let is_ctrl_left_right = matches!(key.code, KeyCode::Left | KeyCode::Right)
+                            && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+                        if is_ctrl_left_right && !self.window_manager.splits.is_empty() {
+                            let shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+                            let base: i32 = if shift { 10 } else { 2 };
+                            let delta = if key.code == KeyCode::Left { -(base) } else { base };
+                            self.window_manager.resize_focused(delta);
+                            let _ = crate::views::window_manager::persist::save(&self.window_manager);
+                            return InputOutcome::Changed;
+                        }
+                    }
                 }
                 if let Event::Key(key) = ev
                     && key.kind != KeyEventKind::Release
@@ -4830,7 +4894,10 @@ impl AppView {
                         {
                             d.restore_peek_viewport(agents);
                         }
+                        // Remember area for accurate mouse drag hit-testing next frame.
+                        self.tiling_last_area = Some(view_area);
                         // Tiling draw path (behind flag): if enabled and >1 visible windows, render tiled boxes + minimized pills.
+                        // When tiled, each AgentView draws into its tile; single visible window falls back to normal layout (no regression).
                         let tiled = self.tiling_enabled && self.window_manager.is_tiled();
                         if tiled {
                             let focused_id = self
@@ -4845,6 +4912,41 @@ impl AppView {
                             if self.window_manager.has_minimized() {
                                 self.window_manager
                                     .draw_minimized_pills(view_area, f.buffer_mut());
+                            }
+                            // Also draw placeholder per-tile interiors when >1 visible windows and we have multiple agents.
+                            // Each tile inner gets a faded placeholder title until full per-tile AgentView wiring lands.
+                            let rects = self.window_manager.compute_tiled_layout(view_area);
+                            let visible: Vec<_> = self.window_manager.visible_windows().iter().map(|w| (w.id.clone(), w.title.clone())).collect();
+                            // If we have tiles for secondary agents, draw their placeholder boxes inside the already-drawn tiled boxes' inner areas.
+                            // Main agent (focused id or first) keeps the full AgentView draw; other tiles show title+placeholder to prove tiling is live.
+                            if rects.len() > 1 && visible.len() > 1 {
+                                for (idx, (win_id, title)) in visible.iter().enumerate().skip(1) {
+                                    if idx >= rects.len() {
+                                        break;
+                                    }
+                                    let r = rects[idx];
+                                    if r.width < 4 || r.height < 4 {
+                                        continue;
+                                    }
+                                    // Inner placeholder: small text line at inner top showing tile identity
+                                    let inner = {
+                                        let b = ratatui::widgets::Block::default()
+                                            .borders(ratatui::widgets::Borders::ALL)
+                                            .border_type(ratatui::widgets::BorderType::Rounded);
+                                        b.inner(r)
+                                    };
+                                    if inner.width >= 6 && inner.height >= 1 {
+                                        let placeholder = format!("{} — placeholder", if title.is_empty() { win_id } else { title });
+                                        let style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
+                                        let truncated: String = placeholder.chars().take(inner.width as usize).collect();
+                                        for (i, ch) in truncated.chars().enumerate() {
+                                            if let Some(cell) = f.buffer_mut().cell_mut((inner.x + i as u16, inner.y)) {
+                                                cell.set_char(ch);
+                                                cell.set_style(style);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         if let Some(agent) = agents.get_mut(&id) {
@@ -4869,10 +4971,11 @@ impl AppView {
                                 0
                             };
                             let agent_area_eff = if tiled {
-                                // When tiled, give each window its rect; main agent keeps first tile, others are visual-only for now.
-                                // Compute tiled layout and use first rect for the main draw (full per-tile AgentView later).
+                                // When tiled, give the active agent its tile rect (first tile for now; future: map focused window to agent).
                                 let rects = self.window_manager.compute_tiled_layout(view_area);
-                                rects.first().copied().unwrap_or(agent_area)
+                                // Pick rect for focused window if we can resolve it, else first tile
+                                let focused_idx = self.window_manager.visible_windows().iter().position(|w| Some(w.id.as_str()) == self.window_manager.focused_window().map(|f| f.id.as_str())).unwrap_or(0);
+                                rects.get(focused_idx).copied().unwrap_or(agent_area)
                             } else {
                                 agent_area
                             };
