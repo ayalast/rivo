@@ -343,7 +343,7 @@ fn human_wayland_error_includes_detail_once() {
     assert_eq!(
         human::format(&report),
         concat!(
-            "Grok Doctor\n",
+            "rivo Doctor\n",
             "\n",
             "Environment\n",
             "  · terminal                     Ghostty\n",
@@ -452,7 +452,7 @@ fn human_healthy_fixture_is_exact() {
     assert_eq!(
         human::format(&healthy_report()),
         concat!(
-            "Grok Doctor\n",
+            "rivo Doctor\n",
             "\n",
             "Environment\n",
             "  · terminal                     Ghostty\n",
@@ -479,7 +479,7 @@ fn human_mixed_fixture_is_exact() {
     assert_eq!(
         human::format(&mixed_report()),
         concat!(
-            "Grok Doctor\n",
+            "rivo Doctor\n",
             "\n",
             "Environment\n",
             "  · terminal                     Ghostty\n",
@@ -639,7 +639,7 @@ fn human_incomplete_fixture_is_exact_without_duplicate_probe_rows() {
     assert_eq!(
         human::format(&report),
         concat!(
-            "Grok Doctor\n",
+            "rivo Doctor\n",
             "\n",
             "Environment\n",
             "  · terminal                     Ghostty\n",
