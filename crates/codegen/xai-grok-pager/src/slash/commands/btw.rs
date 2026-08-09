@@ -45,6 +45,7 @@ impl SlashCommand for BtwCommand {
         CommandResult::Action(Action::CreateSideChat {
             parent_id: String::new(),
             prompt: prompt.to_string(),
+            from_selection: false,
         })
     }
 }

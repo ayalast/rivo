@@ -25,39 +25,55 @@ pub(super) fn ask_in_side_chat_action(app: &mut AppView) -> Option<Action> {
     Some(Action::CreateSideChat {
         parent_id: String::new(),
         prompt: format!("[contexto seleccionado]\n{text}"),
+        from_selection: true,
     })
 }
 
 /// Best-effort copyable text of the scrollback entry currently selected on the
-/// active agent. Mirrors `dispatch_copy_block_content` minus the clipboard.
+/// active agent. When the side panel is focused, resolves to the selected side
+/// tab's agent (Cursor-faithful: Ctrl+Shift+S inside a side chat acts on that
+/// chat's selection, not the parent's). Mirrors `dispatch_copy_block_content`
+/// minus the clipboard.
 fn with_selected_block_copy_text(app: &mut AppView) -> Option<String> {
     let mut out = None;
-    with_active_agent(app, |agent| {
-        let Some(idx) = agent.scrollback.selected() else {
-            return;
-        };
-        if agent.scrollback.entry_content_hidden_by_group(idx) {
-            return;
+    let target: Option<crate::app::agent::AgentId> = if app.side_panel.focused {
+        app.side_panel.selected_agent_id(&app.side_chats)
+    } else {
+        match app.active_view {
+            crate::app::app_view::ActiveView::Agent(id) => Some(id),
+            _ => None,
         }
-        let Some(entry) = agent.scrollback.entry(idx) else {
-            return;
-        };
-        let text = if let RenderBlock::BgTask(block) = &entry.block {
-            agent
-                .session
-                .bg_tasks
-                .get(&block.task_id)
-                .map(|t| t.stdout.clone())
-                .filter(|s| !s.is_empty())
-        } else {
-            entry.block.copy_text(entry.raw)
-        };
-        if let Some(text) = text
-            && !text.is_empty()
-        {
-            out = Some(text);
-        }
-    });
+    };
+    let Some(agent_id) = target else {
+        return None;
+    };
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return None;
+    };
+    let Some(idx) = agent.scrollback.selected() else {
+        return None;
+    };
+    if agent.scrollback.entry_content_hidden_by_group(idx) {
+        return None;
+    }
+    let Some(entry) = agent.scrollback.entry(idx) else {
+        return None;
+    };
+    let text = if let RenderBlock::BgTask(block) = &entry.block {
+        agent
+            .session
+            .bg_tasks
+            .get(&block.task_id)
+            .map(|t| t.stdout.clone())
+            .filter(|s| !s.is_empty())
+    } else {
+        entry.block.copy_text(entry.raw)
+    };
+    if let Some(text) = text
+        && !text.is_empty()
+    {
+        out = Some(text);
+    }
     out
 }
 

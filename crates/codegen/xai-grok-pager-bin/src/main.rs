@@ -1055,7 +1055,7 @@ async fn forward_stdio_line_to_leader(
 }
 /// Emitted by both leader guards (server mode and leader-connect) so the two sites
 /// can't drift.
-const PLUGIN_DIR_LEADER_WARNING: &str = "grok: --plugin-dir is ignored in leader mode; run with --no-leader to \
+const PLUGIN_DIR_LEADER_WARNING: &str = "rivo: --plugin-dir is ignored in leader mode; run with --no-leader to \
      load per-process plugins";
 /// Run the `agent` subcommand, dispatching to the appropriate mode.
 async fn run_agent_command(
@@ -1140,7 +1140,7 @@ async fn run_agent_command(
         None,
     );
     if let Some(warning) = launch_yolo.blocked_warning {
-        eprintln!("grok: {warning}");
+        eprintln!("rivo: {warning}");
     }
     agent_config.default_yolo_mode = launch_yolo.yolo;
     agent_config.default_auto_mode = xai_grok_shell::util::config::effective_auto_for_launch(
@@ -1603,10 +1603,10 @@ impl WorkerCount {
                 used,
                 cores,
             } => Some(format!(
-                "grok: clamped {GROK_WORKER_THREADS_ENV}={requested} to {used} (valid range is 1..={cores})"
+                "rivo: clamped {GROK_WORKER_THREADS_ENV}={requested} to {used} (valid range is 1..={cores})"
             )),
             Self::Ignored { value, .. } => Some(format!(
-                "grok: ignoring {GROK_WORKER_THREADS_ENV}={value:?} (not a valid integer)"
+                "rivo: ignoring {GROK_WORKER_THREADS_ENV}={value:?} (not a valid integer)"
             )),
         }
     }
@@ -1789,7 +1789,7 @@ fn install_heap_profile_hooks() {
 }
 fn version_text(channel_label: &str) -> String {
     format!(
-        "grok {}\n",
+        "rivo {}\n",
         xai_grok_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), channel_label,)
     )
 }
@@ -1820,6 +1820,22 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     true
 }
 fn main() {
+    // Windows gives the main thread only 1 MiB of stack. The clap derive tree
+    // for this CLI is deep enough that a debug build (opt-level 0, many small
+    // frames) can overflow it before parsing even finishes — while the
+    // optimized release build happens to stay under the limit. Run the real
+    // entry point on a thread with a comfortable stack so both debug and
+    // release behave identically. The wrapper thread's own frame is trivial,
+    // so this does not hide genuine unbounded recursion.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run_main)
+        .expect("failed to spawn main thread")
+        .join()
+        .expect("main thread panicked");
+}
+
+fn run_main() {
     xai_grok_telemetry::startup::mark_process_start();
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
@@ -1846,7 +1862,7 @@ fn main() {
     );
     raise_fd_limit();
     if let Err(e) = xai_grok_config::validate_requirements() {
-        eprintln!("Couldn't start Grok: {e}");
+        eprintln!("Couldn't start rivo: {e}");
         eprintln!();
         eprintln!(
             "Update Grok to a version the policy allows, or ask your administrator \
@@ -1865,7 +1881,7 @@ fn main() {
     if xai_grok_shell::util::config::load_crash_handler_enabled_sync() {
         let crash_dir = xai_grok_shell::util::grok_home::grok_home().join("crash");
         if let Some(report) = xai_crash_handler::check_previous_crash(&crash_dir) {
-            eprintln!("Grok crashed during your last session.");
+            eprintln!("rivo crashed during your last session.");
             eprintln!("  Signal:  {}", report.signal_name);
             eprintln!("  Version: {}", report.app_version);
             eprintln!("  Report:  {}", report.report_path.display());
@@ -1894,7 +1910,7 @@ fn main() {
         .enable_all()
         .build()
         .unwrap_or_else(|e| {
-            eprintln!("grok: failed to start tokio runtime with {workers} workers: {e}");
+            eprintln!("rivo: failed to start tokio runtime with {workers} workers: {e}");
             shutdown_and_flush_telemetry(1);
         });
     let result = run_and_shutdown(runtime, async_main(args), RUNTIME_SHUTDOWN_GRACE);
@@ -2179,7 +2195,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             None,
         );
         if let Some(warning) = launch_yolo.blocked_warning {
-            eprintln!("grok: {warning}");
+            eprintln!("rivo: {warning}");
         }
         let json_schema = args
             .json_schema
@@ -2591,7 +2607,7 @@ mod tests {
             let mut output = Vec::new();
             write_version(&mut output, label).unwrap();
             let output = String::from_utf8(output).unwrap();
-            assert!(output.starts_with("grok "));
+            assert!(output.starts_with("rivo "));
             assert!(output.contains(env!("VERSION_WITH_COMMIT")));
             assert!(output.ends_with(expected_suffix), "{output:?}");
         }

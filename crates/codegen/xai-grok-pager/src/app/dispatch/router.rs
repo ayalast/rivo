@@ -1139,10 +1139,16 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
         Action::SendBtw(question) => dispatch_send_btw(app, question),
-        Action::CreateSideChat { parent_id, prompt } => {
-            // Cursor-faithful: side chats are not nestable. If the focused side panel is focused, refuse.
-            let nested_guard = app.side_panel.focused;
-            if nested_guard {
+        Action::CreateSideChat {
+            parent_id,
+            prompt,
+            from_selection,
+        } => {
+            // Cursor-faithful: side chats are not nestable. `/side` or the `+`
+            // button while the panel is focused refuses nesting; "Ask in Side
+            // Chat" (Ctrl+Shift+S) instead creates a sibling of the current
+            // side chat, so it is exempt.
+            if app.side_panel.focused && !from_selection {
                 app.show_toast("Side chats cannot create nested sides");
                 return vec![];
             }

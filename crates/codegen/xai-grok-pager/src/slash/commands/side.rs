@@ -52,6 +52,7 @@ impl SlashCommand for SideCommand {
             return CommandResult::Action(Action::CreateSideChat {
                 parent_id: String::new(),
                 prompt: String::new(),
+                from_selection: false,
             });
         }
         // The rest of the line is always the initial prompt.  Management is
@@ -61,6 +62,7 @@ impl SlashCommand for SideCommand {
         CommandResult::Action(Action::CreateSideChat {
             parent_id: String::new(),
             prompt: trimmed.to_string(),
+            from_selection: false,
         })
     }
 }

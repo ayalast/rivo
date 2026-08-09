@@ -2565,6 +2565,7 @@ impl AppView {
                                             InputOutcome::Action(Action::CreateSideChat {
                                                 parent_id: String::new(),
                                                 prompt: String::new(),
+                                                from_selection: false,
                                             })
                                         }
                                         SideTabHit::Overflow => InputOutcome::Changed,

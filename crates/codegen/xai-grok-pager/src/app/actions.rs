@@ -727,7 +727,15 @@ pub enum Action {
     /// Send a /btw side question (bypasses queue, works while agent is busy).
     SendBtw(String),
     /// Create a durable side chat (parent_id + initial prompt).
-    CreateSideChat { parent_id: String, prompt: String },
+    /// `from_selection` distinguishes "Ask in Side Chat" (Ctrl+Shift+S) from
+    /// `/side`: selection-created sides are siblings of the current side chat
+    /// even when the side panel is focused, whereas `/side` from a side refuses
+    /// nesting.
+    CreateSideChat {
+        parent_id: String,
+        prompt: String,
+        from_selection: bool,
+    },
     /// List side chats (shows toast with counts).
     ListSideChats,
     /// Switch active side chat.
