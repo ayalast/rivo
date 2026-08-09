@@ -1,7 +1,7 @@
-//! `/btw` -- ask a side question without interrupting the running agent.
+//! `/btw` -- compatibility alias for a durable `/side` question.
 //!
-//! Returns `CommandResult::Action(Action::SendBtw(...))` so the dispatch layer
-//! fires it as an ACP ext method (`x.ai/btw`) that bypasses the prompt queue.
+//! Cursor's early launch copy used `/btw`; Rivo keeps it as a spelling alias,
+//! not a second ephemeral conversation implementation.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -14,7 +14,7 @@ impl SlashCommand for BtwCommand {
     }
 
     fn description(&self) -> &str {
-        "Ask a side question without interrupting"
+        "Open a durable side chat (compatibility alias for /side)"
     }
 
     fn session_scoped(&self) -> bool {
@@ -38,6 +38,13 @@ impl SlashCommand for BtwCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
-        CommandResult::Action(Action::SendBtw(args.trim().to_string()))
+        let prompt = args.trim();
+        if prompt.is_empty() {
+            return CommandResult::Message("Usage: /btw <question>".to_string());
+        }
+        CommandResult::Action(Action::CreateSideChat {
+            parent_id: String::new(),
+            prompt: prompt.to_string(),
+        })
     }
 }

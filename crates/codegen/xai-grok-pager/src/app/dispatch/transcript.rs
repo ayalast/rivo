@@ -1,13 +1,65 @@
 //! Transcript export, block copying, viewer/modal, and input-log dump dispatchers.
 
 use super::ctx::with_active_agent;
-use crate::app::actions::Effect;
+use crate::app::actions::{Action, Effect};
 use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::{BlockContent, RenderBlock};
 use crate::scrollback::blocks::ToolCallBlock;
 use agent_client_protocol as acp;
 use xai_grok_telemetry::session_ctx::log_event;
+
+/// Build the `CreateSideChat` action for the selected block's content
+/// (`Ctrl+Shift+S`, Cursor's **Ask in Side Chat**). Returns `None` with a
+/// nudge toast when nothing is selected.
+pub(super) fn ask_in_side_chat_action(app: &mut AppView) -> Option<Action> {
+    let selected_text = with_selected_block_copy_text(app);
+    let Some(text) = selected_text else {
+        app.show_toast("No block selected — select a message, then press Ctrl+Shift+S, or use /side");
+        return None;
+    };
+    if text.trim().is_empty() {
+        app.show_toast("No block selected — select a message, then press Ctrl+Shift+S, or use /side");
+        return None;
+    }
+    Some(Action::CreateSideChat {
+        parent_id: String::new(),
+        prompt: format!("[contexto seleccionado]\n{text}"),
+    })
+}
+
+/// Best-effort copyable text of the scrollback entry currently selected on the
+/// active agent. Mirrors `dispatch_copy_block_content` minus the clipboard.
+fn with_selected_block_copy_text(app: &mut AppView) -> Option<String> {
+    let mut out = None;
+    with_active_agent(app, |agent| {
+        let Some(idx) = agent.scrollback.selected() else {
+            return;
+        };
+        if agent.scrollback.entry_content_hidden_by_group(idx) {
+            return;
+        }
+        let Some(entry) = agent.scrollback.entry(idx) else {
+            return;
+        };
+        let text = if let RenderBlock::BgTask(block) = &entry.block {
+            agent
+                .session
+                .bg_tasks
+                .get(&block.task_id)
+                .map(|t| t.stdout.clone())
+                .filter(|s| !s.is_empty())
+        } else {
+            entry.block.copy_text(entry.raw)
+        };
+        if let Some(text) = text
+            && !text.is_empty()
+        {
+            out = Some(text);
+        }
+    });
+    out
+}
 
 /// Copy the selected block's content to the system clipboard.
 ///

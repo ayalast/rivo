@@ -164,8 +164,20 @@ pub(super) fn find_session_match(
 }
 
 /// Whether the matched agent is the one currently displayed.
+///
+/// "Displayed" covers both the parent (`ActiveView::Agent`) and the side-chat
+/// tab currently selected in the side panel. Streaming into a visible side tab
+/// must request a redraw even though the parent remains `ActiveView`.
 pub(super) fn is_matched_agent_active(app: &AppView, matched_agent: AgentId) -> bool {
-    matches!(app.active_view, ActiveView::Agent(id) if id == matched_agent)
+    if matches!(app.active_view, ActiveView::Agent(id) if id == matched_agent) {
+        return true;
+    }
+    // Selected side tab: its `SideChat.agent_id` is live and matches.
+    app.side_panel.selected_id().is_some_and(|sid| {
+        app.side_chats
+            .get(sid)
+            .is_some_and(|chat| chat.agent_id == Some(matched_agent))
+    })
 }
 
 /// Resolve the `AgentId` that should own an interactive modal

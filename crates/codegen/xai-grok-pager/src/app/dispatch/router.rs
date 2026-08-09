@@ -102,9 +102,9 @@ use super::status::{
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
-    dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
-    dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
-    dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
+    ask_in_side_chat_action, dispatch_copy_assistant_message, dispatch_copy_block_content,
+    dispatch_copy_block_meta, dispatch_dump_input_log, dispatch_export_conversation,
+    dispatch_open_block_viewer, dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
     dispatch_open_transcript_pager,
 };
 use super::turn::{
@@ -376,23 +376,19 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::SendPrompt(text) => {
-            // Route to focused SideChat (full AgentView clone) when tiling is active.
-            // Each side chat is a real AgentView, not a custom ContentBlock transcript.
-            let side_focused = app.tiling_enabled
+            // Route to the selected SideChat (full AgentView clone) when the side panel is focused.
+            let side_focused = app.side_panel.focused
                 && app.side_chats.active().is_some()
                 && app
-                    .window_manager
-                    .focused_window()
-                    .is_some_and(|w| w.side_chat_id.is_some());
+                    .side_panel
+                    .selected_agent_id(&app.side_chats)
+                    .is_some();
             if side_focused
                 && !text.trim_start().starts_with('/')
                 && let Some(active) = app.side_chats.active().map(|c| c.id.clone())
             {
-                // Resolve the focused side's AgentId and route the prompt through the normal pipeline.
-                let focused_side_id = app
-                    .window_manager
-                    .focused_window()
-                    .and_then(|w| w.side_chat_id.clone());
+                // Resolve the selected side's AgentId and route the prompt through the normal pipeline.
+                let focused_side_id = app.side_panel.selected_id().map(str::to_owned);
                 if let Some(side_id) = focused_side_id {
                     if let Some(agent_id) = app
                         .side_chats
@@ -401,7 +397,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     {
                         // Route via side agent: temporarily treat side agent as active for dispatch.
                         // We can't just call dispatch_send_prompt (it uses active_view). Instead push directly.
-                        if let Some(agent) = app.agents.get_mut(&agent_id) {
+                        if app.agents.contains_key(&agent_id) {
                             let orig_view = app.active_view;
                             app.active_view = crate::app::app_view::ActiveView::Agent(agent_id);
                             let effects = dispatch_send_prompt(app, text.clone());
@@ -661,6 +657,15 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CopyBlockContent => {
             dispatch_copy_block_content(app);
             vec![]
+        }
+        Action::AskInSideChat => {
+            // Ctrl+Shift+S: ask in side chat with the selected block content.
+            if let Some(action) = ask_in_side_chat_action(app) {
+                // Re-dispatch as the durable side creation flow.
+                dispatch(action, app)
+            } else {
+                vec![]
+            }
         }
         Action::CopyAssistantMessage { n, file_path } => {
             dispatch_copy_assistant_message(app, n, file_path);
@@ -1135,12 +1140,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
         Action::SendBtw(question) => dispatch_send_btw(app, question),
         Action::CreateSideChat { parent_id, prompt } => {
-            // Cursor-faithful: side chats are not nestable. If the focused tile is already a side, refuse.
-            let nested_guard = app.tiling_enabled
-                && app
-                    .window_manager
-                    .focused_window()
-                    .is_some_and(|w| w.side_chat_id.is_some());
+            // Cursor-faithful: side chats are not nestable. If the focused side panel is focused, refuse.
+            let nested_guard = app.side_panel.focused;
             if nested_guard {
                 app.show_toast("Side chats cannot create nested sides");
                 return vec![];
@@ -1186,10 +1187,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             } else {
                 Vec::new()
             };
-            let parent_snapshot_clone = parent_snapshot.clone();
             let mut chat = app
                 .side_chats
                 .create_side_with_snapshot(pid.clone(), parent_snapshot, Some(prompt.clone()));
+            // Anchor the durable record to the current workspace so recovery and
+            // `@side` scoping never cross directory boundaries.
+            if let Some(c) = app.side_chats.get_mut(&chat.id) {
+                c.set_workspace_id(app.cwd.to_string_lossy().to_string());
+            }
             // Backfill label if empty (migrated old chats)
             if chat.label.is_empty() {
                 let label = format!("Side {}", app.side_chats.chats.len());
@@ -1207,17 +1212,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 if let Some(parent) = app.agents.get(&pid) {
                     let sid = crate::app::agent::AgentId(app.next_agent_id);
                     app.next_agent_id += 1;
-                    // Seed scrollback: fresh, with hidden parent context as a collapsed system block (model-hidden injection)
+                    // Seed scrollback: fresh. The hidden parent context lives only in the
+                    // durable `SideChat.parent_snapshot` and is never rendered in the side
+                    // transcript (Cursor-faithful: model-only reference context).
                     let mut sb = crate::scrollback::state::ScrollbackState::new();
                     sb.set_appearance(parent.scrollback.appearance().clone());
-                    if !parent_snapshot_clone.is_empty() {
-                        let joined: String = parent_snapshot_clone
-                            .iter()
-                            .map(|b| match b { agent_client_protocol::ContentBlock::Text(t) => t.text.clone(), other => format!("{other:?}") })
-                            .collect::<Vec<_>>()
-                            .join("\n\n---\n\n");
-                        sb.push_block(crate::scrollback::block::RenderBlock::system(format!("[context heredado del chat principal — oculto para el modelo]\n{joined}")));
-                    }
                     // Seed session: same cwd/models/yolo/auto as parent so side can do exactly what main does
                     let session = crate::app::agent::AgentSession {
                         id: sid,
@@ -1296,39 +1295,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             } else {
                 None
             };
-            // Cursor-faithful: /side ALWAYS opens tiled pane docked right 65|35.
-            app.tiling_enabled = true;
-            app.window_manager.tiling_enabled = true;
-            if app.window_manager.windows.is_empty() {
-                let main_title = app
-                    .active_agent()
-                    .and_then(|a| a.session.session_id.as_ref().map(|s| s.0.to_string()))
-                    .unwrap_or_else(|| "main".to_string());
-                app.window_manager.add_window(main_title);
-            }
-            // Ensure side window exists with friendly label, linked to SideChat id.
-            let already = app
-                .window_manager
-                .windows
-                .iter()
-                .any(|w| w.side_chat_id.as_deref() == Some(&id));
-            if !already {
-                app.window_manager.add_side_window(friendly.clone(), id.clone());
-            }
-            if app.window_manager.windows.len() == 2 && !app.window_manager.splits.is_empty() {
-                app.window_manager.splits[0].ratio = 65;
-            }
-            let win_id = app
-                .window_manager
-                .windows
-                .iter()
-                .find(|w| w.side_chat_id.as_deref() == Some(&id))
-                .map(|w| w.id.clone());
-            if let Some(wid) = win_id {
-                app.window_manager.focus(&wid);
-            }
+            // Cursor-faithful: /side opens the side panel docked right, defaulting to the
+            // persisted (or 65/35) split. Additional side chats become tabs in that panel.
+            app.side_panel.open(id.clone());
+            app.side_panel.visible = true;
             let _ = crate::app::side_chat::persist::save_store(&app.side_chats);
-            let _ = crate::views::window_manager::persist::save(&app.window_manager);
             // Each side gets its own ACP session (real server session), not a local echo.
             // If the side already has a queued prompt, we must create the session now so the drain can fire.
             let mut create_effects: Vec<crate::app::actions::Effect> = Vec::new();
@@ -1396,18 +1367,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::SwitchSideChat { id } => {
-            if app.side_chats.switch(&id) {
-                if app.tiling_enabled {
-                    let win_id = app
-                        .window_manager
-                        .windows
-                        .iter()
-                        .find(|w| w.side_chat_id.as_deref() == Some(&id))
-                        .map(|w| w.id.clone());
-                    if let Some(wid) = win_id {
-                        app.window_manager.focus(&wid);
-                    }
-                }
+            if app.side_panel.select(&id) {
+                let _ = app.side_chats.switch(&id);
                 let friendly = app.side_chats.get(&id).map(|c| c.friendly_label()).unwrap_or(id.clone());
                 app.show_toast(&format!("Switched to {friendly}"));
             } else {
@@ -1416,12 +1377,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::CloseSideChat { id } => {
-            let win_id = app
-                .window_manager
-                .windows
-                .iter()
-                .find(|w| w.side_chat_id.as_deref() == Some(&id))
-                .map(|w| w.id.clone());
             let friendly = app.side_chats.get(&id).map(|c| c.friendly_label()).unwrap_or(id.clone());
             // Remove linked AgentView first
             if let Some(chat) = app.side_chats.get(&id) {
@@ -1430,11 +1385,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 }
             }
             app.side_chats.close(&id);
-            if let Some(wid) = win_id {
-                app.window_manager.remove_window(&wid);
-            }
+            app.side_panel.close(&id);
             let _ = crate::app::side_chat::persist::save_store(&app.side_chats);
-            let _ = crate::views::window_manager::persist::save(&app.window_manager);
             app.show_toast(&format!("{friendly} archived"));
             vec![]
         }
@@ -1449,26 +1401,31 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::ToggleTiling | Action::SetTiling(_) => {
+            // Remapped to side-panel visibility: `/window` shows/hides the panel when tabs exist.
             let enable = match action {
                 Action::SetTiling(b) => b,
-                _ => !app.tiling_enabled && !app.window_manager.tiling_enabled,
+                _ => !app.side_panel.is_open(),
             };
-            app.tiling_enabled = enable;
-            app.window_manager.tiling_enabled = enable;
-            if enable && app.window_manager.windows.is_empty() {
-                // Seed a primary window from the active agent session if available, else generic.
-                let title = app
-                    .active_agent()
-                    .and_then(|a| a.session.session_id.as_ref().map(|sid| sid.0.to_string()))
-                    .unwrap_or_else(|| "main".to_string());
-                app.window_manager.add_window(title);
-            }
-            let _ = crate::views::window_manager::persist::save(&app.window_manager);
             if enable {
-                app.show_toast("Tiling ON — Ctrl+Tab cycle, Ctrl+←/→ resize, drag divider");
+                if app.side_panel.open_tabs.is_empty() {
+                    app.show_toast("No side chats open — use /side <question> to start one");
+                } else {
+                    app.side_panel.show();
+                    app.side_panel.focused = true;
+                    app.show_toast("Side panel shown — Ctrl+Tab cycle, Ctrl+←/→ resize, drag divider");
+                }
             } else {
-                app.show_toast("Tiling OFF");
+                app.side_panel.hide();
+                app.show_toast("Side panel hidden");
             }
+            return vec![];
+        }
+        Action::SetTilingReset => {
+            app.side_panel_preferences.set_main_ratio(
+                crate::views::side_panel::DEFAULT_MAIN_RATIO,
+            );
+            let _ = crate::views::side_panel::persist::save(&app.side_panel_preferences);
+            app.show_toast("Side panel reset to 65|35");
             return vec![];
         }
         Action::SendRecap { auto } => dispatch_send_recap(app, auto),

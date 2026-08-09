@@ -1462,10 +1462,15 @@ pub(crate) async fn run(
         // Respect persisted flag so `cargo check` users aren't surprised, but also respect AppView default off semantics
         // by only hydrating if the file actually exists (load returns non-empty or tiling true). Empty default is no-op.
         if !persisted.windows.is_empty() || persisted.tiling_enabled {
-            app.window_manager = persisted;
-            app.tiling_enabled = app.window_manager.tiling_enabled;
-            // Ensure tiling flag consistency; if persisted says tiling true but we want default off, honor persisted (user opted in).
-            // Default file absent -> both are off already.
+            // Side-chat windows are ephemeral presentation: never restore them after a restart.
+            // Keep only the main window geometry concept (ratio was migrated to side-panel.json).
+            let mut accepted = persisted;
+            accepted.windows.retain(|w| w.side_chat_id.is_none());
+            accepted.tiling_enabled = false;
+            if !accepted.windows.is_empty() {
+                app.window_manager = accepted;
+            }
+            app.tiling_enabled = false;
         }
     }
     // Hydrate durable side chats (Cursor-faithful: ~/.rivo/side-chats.json + side-*.jsonl, fallback ~/.grok).
@@ -1473,8 +1478,13 @@ pub(crate) async fn run(
         let store = crate::app::side_chat::persist::load_store();
         if !store.is_empty() {
             app.side_chats = store;
+            // Reset process-local activity: the app must start on the parent panel only.
+            app.side_chats.active_id = None;
         }
     }
+    // Reset side-panel presentation: tabs are ephemeral per process, the persisted
+    // split ratio (side-panel.json) stays as the only surviving UI preference.
+    app.side_panel.clear_for_startup();
     let config_session_bools = load_initial_config_session_bools();
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;

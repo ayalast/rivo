@@ -400,6 +400,22 @@ pub(super) fn default_actions(
                 "Opens the selected block in a focused, scrollable full-screen viewer.\nBest for long tool output, large files, or code you want to read away from the surrounding transcript.\nEsc returns to the conversation.",
             ),
         },
+        // ── Side chat ──────────────────────────────────────────────
+        ActionDef {
+            id: ActionId::AskInSideChat,
+            label: "side",
+            description: "Ask in side chat",
+            default_key: key!('s', CONTROL | SHIFT),
+            alt_keys: vec![],
+            category: Category::ConversationAction,
+            context: When::ScrollbackFocused,
+            hint_priority: None,
+            hint_key_display: None,
+            requires_confirmation: false,
+            long_help: Some(
+                "Populates a side chat with the selected block's content, creating one if none is open.\nWith no selection it only nudges you to use /side.\nRivo keeps this as a Cursor-faithful shortcut; on Windows terminals Ctrl+Shift+S may be captured by the terminal itself — use /side then.",
+            ),
+        },
         // ── Link navigation ─────────────────────────────────────────
         ActionDef {
             id: ActionId::OpenNextLink,

@@ -16,6 +16,10 @@ use crate::notifications::NotificationService;
 use crate::render::draw::CursorState;
 use crate::scrollback::render::ScratchBuffer;
 use crate::views::prompt_widget::PromptWidget;
+use crate::views::side_panel::{
+    persist as side_panel_persist, tab_hitboxes, SidePanelFrame, SidePanelLayout,
+    SidePanelPreferences, SideTabHit, SideTabHitbox, SIDE_TAB_BAR_HEIGHT,
+};
 use crate::views::welcome::WelcomePromptFocus;
 use agent_client_protocol as acp;
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
@@ -1222,6 +1226,15 @@ pub struct AppView {
     /// Durable side chats (Cursor-faithful). Each side chat is a full AgentView clone,
     /// not a custom transcript renderer — same prompt, scrollback, tools.
     pub side_chats: crate::app::side_chat::SideChatStore,
+    /// Process-local presentation of side conversations. It owns the one
+    /// right-hand tab panel; durable metadata remains in `side_chats`.
+    pub side_panel: SidePanelLayout,
+    /// The only persisted UI setting for the panel: its splitter ratio.
+    pub side_panel_preferences: SidePanelPreferences,
+    /// Hit targets generated while drawing the visible tab strip.
+    pub(crate) side_tab_hits: Vec<SideTabHitbox>,
+    /// Rectangles of the last frame's side-panel split (main/divider/panel).
+    pub(crate) side_panel_frame: SidePanelFrame,
     /// Tiled window manager (Cursor-faithful). Scaffold behind flag — existing
     /// single-column layout unchanged when `tiling_enabled == false`.
     pub window_manager: crate::views::window_manager::WindowManager,
@@ -1231,12 +1244,6 @@ pub struct AppView {
     pub tiling_enabled: bool,
     /// Last area used for tiling drag calculations (set during draw).
     pub(crate) tiling_last_area: Option<ratatui::layout::Rect>,
-    /// Optional drag target split index while dragging divider.
-    pub(crate) tiling_drag_split: Option<usize>,
-    /// Hit area for side-tab close buttons [X] — rebuilt each frame.
-    pub(crate) side_tab_close_hits: Vec<(ratatui::layout::Rect, String)>,
-    /// Hit rects for each tiled window (for click-to-focus) — rebuilt each frame.
-    pub(crate) side_window_hits: Vec<(ratatui::layout::Rect, String)>,
 }
 /// Reshow window elapsed? None/0 = never. Unparseable ack fails open (show).
 fn privacy_banner_reshow_elapsed(acked_at: &str, reshow_days: Option<u64>) -> bool {
@@ -1650,12 +1657,13 @@ impl AppView {
             voice_cmd_tx: None,
             voice_state: VoiceState::Idle,
             side_chats: crate::app::side_chat::SideChatStore::new(),
+            side_panel: SidePanelLayout::default(),
+            side_panel_preferences: side_panel_persist::load(),
+            side_tab_hits: Vec::new(),
+            side_panel_frame: SidePanelFrame::default(),
             window_manager: crate::views::window_manager::WindowManager::new(),
             tiling_enabled: false,
             tiling_last_area: None,
-            tiling_drag_split: None,
-            side_tab_close_hits: Vec::new(),
-            side_window_hits: Vec::new(),
         }
     }
     /// Seed `deferred_model_switch` from CLI `-m`. The CLI effort token is
@@ -2328,31 +2336,23 @@ impl AppView {
     fn dev_fps_rows(&self) -> u16 {
         0
     }
-    /// Route a scroll delta to the active view (and to the focused side tile when tiled).
+    /// Route a scroll delta to the active view (and to the focused side tab when the panel is open).
     fn dispatch_scroll(&mut self, lines: i32, column: u16, row: u16) {
-        // When tiling is active and a side tile is focused, scroll must go to that side's AgentView.
-        if (self.tiling_enabled || self.window_manager.tiling_enabled)
-            && self
-                .window_manager
-                .focused_window()
-                .is_some_and(|w| w.side_chat_id.is_some())
+        // When the side panel is focused, scroll goes to the selected tab's AgentView.
+        if self.side_panel.focused
+            && let Some(sid) = self.side_panel.selected_id().and_then(|sid| {
+                self.side_chats.get(sid).and_then(|c| c.agent_id)
+            })
         {
-            if let Some(sid) = self
-                .window_manager
-                .focused_window()
-                .and_then(|w| w.side_chat_id.clone())
-                .and_then(|sid| self.side_chats.get(&sid).and_then(|c| c.agent_id))
-            {
-                if let Some(agent) = self.agents.get_mut(&sid) {
-                    if let Some(child_sid) = agent.active_subagent.clone()
-                        && let Some(child) = agent.subagent_views.get_mut(&child_sid)
-                    {
-                        child.handle_scroll(lines, column, row);
-                        return;
-                    }
-                    agent.handle_scroll(lines, column, row);
+            if let Some(agent) = self.agents.get_mut(&sid) {
+                if let Some(child_sid) = agent.active_subagent.clone()
+                    && let Some(child) = agent.subagent_views.get_mut(&child_sid)
+                {
+                    child.handle_scroll(lines, column, row);
                     return;
                 }
+                agent.handle_scroll(lines, column, row);
+                return;
             }
         }
         match self.active_view {
@@ -2503,6 +2503,22 @@ impl AppView {
             && let Some(direction) = ScrollDirection::from_mouse_event(mouse)
             && !modal_open
         {
+            // Scrolling over an open side panel focuses it first, then routes the delta.
+            if self.side_panel.is_open() && self.side_panel_frame.is_open() {
+                let frame = self.side_panel_frame;
+                if mouse.row >= frame.panel.y
+                    && mouse.row < frame.panel.y + frame.panel.height
+                    && mouse.column >= frame.panel.x
+                    && mouse.column < frame.panel.x + frame.panel.width
+                {
+                    self.side_panel.focused = true;
+                    if let Some(sid) = self.side_panel.selected_id().map(str::to_owned) {
+                        let _ = self.side_chats.switch(&sid);
+                    }
+                } else {
+                    self.side_panel.focused = false;
+                }
+            }
             let config = self
                 .scroll_config
                 .with_viewport_height(self.scroll_viewport_height());
@@ -2526,72 +2542,83 @@ impl AppView {
                     | MouseEventKind::Up(MouseButton::Left)
                     | MouseEventKind::Moved
             );
-            // Tiling divisor drag + click-to-focus + [X] close: use last draw area for accurate hit-test.
-            if self.tiling_enabled || self.window_manager.tiling_enabled {
-                if let Some(area) = self.tiling_last_area {
-                    match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            // [X] close hit (tab header) takes priority over split drag / focus.
-                            for (hit_rect, side_id) in self.side_tab_close_hits.clone() {
-                                if hit_rect.contains((mouse.column, mouse.row).into()) {
-                                    return InputOutcome::Action(Action::CloseSideChat { id: side_id });
-                                }
-                            }
-                            // Split drag?
-                            if let Some(idx) = self.window_manager.hit_test_split(area, mouse.column) {
-                                self.tiling_drag_split = Some(idx);
-                                if let Some(s) = self.window_manager.splits.get_mut(idx) {
-                                    s.dragging = true;
-                                }
-                                return InputOutcome::Changed;
-                            }
-                            // Click-to-focus: hit a window rect?
-                            for (hit_rect, win_id) in self.side_window_hits.clone() {
-                                if hit_rect.contains((mouse.column, mouse.row).into()) {
-                                    self.window_manager.focus(&win_id);
-                                    // Sync side_chats.active_id when focusing a side window
-                                    if let Some(win) = self.window_manager.windows.iter().find(|w| w.id == win_id) {
-                                        if let Some(sid) = &win.side_chat_id {
-                                            let _ = self.side_chats.switch(sid);
+            // Side panel: tab strip hits, divider drag, and click-to-focus use the
+            // geometry computed during the last frame's draw.
+            if self.side_panel.is_open() && self.side_panel_frame.is_open() {
+                let frame = self.side_panel_frame;
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        // Tab strip hits (select / × / + / overflow) take priority.
+                        if mouse.row == frame.panel.y {
+                            for hit in self.side_tab_hits.clone() {
+                                if hit.contains(mouse.column) {
+                                    return match hit.hit {
+                                        SideTabHit::Select(sid) => {
+                                            self.side_panel.select(&sid);
+                                            let _ = self.side_chats.switch(&sid);
+                                            InputOutcome::Changed
                                         }
-                                    }
-                                    let _ = crate::views::window_manager::persist::save(&self.window_manager);
-                                    return InputOutcome::Changed;
+                                        SideTabHit::Close(sid) => {
+                                            InputOutcome::Action(Action::CloseSideChat { id: sid })
+                                        }
+                                        SideTabHit::Create => {
+                                            InputOutcome::Action(Action::CreateSideChat {
+                                                parent_id: String::new(),
+                                                prompt: String::new(),
+                                            })
+                                        }
+                                        SideTabHit::Overflow => InputOutcome::Changed,
+                                    };
                                 }
                             }
                         }
-                        MouseEventKind::Drag(MouseButton::Left) => {
-                            let should_drag = self.tiling_drag_split.is_some()
-                                || self.window_manager.splits.iter().any(|s| s.dragging);
-                            if should_drag || self.window_manager.is_tiled() {
-                                self.window_manager.handle_drag(area, mouse.column);
-                                if let Some(idx) = self.tiling_drag_split {
-                                    if let Some(s) = self.window_manager.splits.get_mut(idx) {
-                                        s.dragging = true;
-                                    }
-                                }
-                                return InputOutcome::Changed;
-                            }
-                        }
-                        MouseEventKind::Up(MouseButton::Left) => {
-                            self.window_manager.end_drag();
-                            self.tiling_drag_split = None;
-                        }
-                        _ => {}
-                    }
-                } else {
-                    match mouse.kind {
-                        MouseEventKind::Drag(MouseButton::Left) => {
-                            let proxy_area = ratatui::layout::Rect::new(0, 0, 120, 24);
-                            self.window_manager.handle_drag(proxy_area, mouse.column);
+                        // Divider drag?
+                        if mouse.row >= frame.divider.y
+                            && mouse.row < frame.divider.y + frame.divider.height
+                            && mouse.column == frame.divider.x
+                        {
+                            self.side_panel.dragging = true;
                             return InputOutcome::Changed;
                         }
-                        MouseEventKind::Up(MouseButton::Left) => {
-                            self.window_manager.end_drag();
-                            self.tiling_drag_split = None;
+                        // Click inside the panel focuses the selected side chat.
+                        if mouse.row >= frame.panel.y && mouse.row < frame.panel.y + frame.panel.height
+                            && mouse.column >= frame.panel.x
+                            && mouse.column < frame.panel.x + frame.panel.width
+                        {
+                            self.side_panel.focused = true;
+                            if let Some(sid) = self.side_panel.selected_id().map(str::to_owned) {
+                                let _ = self.side_chats.switch(&sid);
+                            }
+                            return InputOutcome::Changed;
                         }
-                        _ => {}
+                        // Click in the main area returns focus to the parent.
+                        if mouse.row >= frame.main.y && mouse.row < frame.main.y + frame.main.height
+                            && mouse.column >= frame.main.x
+                            && mouse.column < frame.main.x + frame.main.width
+                        {
+                            self.side_panel.focused = false;
+                            return InputOutcome::Changed;
+                        }
                     }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if self.side_panel.dragging {
+                            self.side_panel_preferences.set_from_divider(
+                                self.side_panel_frame.main
+                                    .union(self.side_panel_frame.divider)
+                                    .union(self.side_panel_frame.panel),
+                                mouse.column,
+                            );
+                            return InputOutcome::Changed;
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if self.side_panel.dragging {
+                            self.side_panel.dragging = false;
+                            let _ = side_panel_persist::save(&self.side_panel_preferences);
+                            return InputOutcome::Changed;
+                        }
+                    }
+                    _ => {}
                 }
             }
             if is_mouse_action {}
@@ -2873,8 +2900,8 @@ impl AppView {
                 if let Some(outcome) = self.voice_esc_outcome(key_event) {
                     return outcome;
                 }
-                // Tiling keyboard: Ctrl+Tab cycle focus, Alt+Tab/Alt+←→ fallback, Ctrl/Alt+←/→ resize
-                if self.tiling_enabled || self.window_manager.tiling_enabled {
+                // Side-panel keyboard: Ctrl+Tab / Ctrl+Shift+Tab cycle tabs + main, Ctrl/Alt+←/→ resize.
+                if self.side_panel.is_open() {
                     if let Event::Key(key) = ev
                         && key.kind != KeyEventKind::Release
                     {
@@ -2882,51 +2909,54 @@ impl AppView {
                             && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
                         let is_alt_tab = (key.code == KeyCode::Tab || key.code == KeyCode::BackTab)
                             && key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
-                        if (is_ctrl_tab || is_alt_tab) && self.window_manager.windows.len() > 1 {
-                            self.window_manager.cycle_focus();
-                            // Keep side_chats.active_id in sync with window focus so SendPrompt routing follows.
-                            if let Some(w) = self.window_manager.focused_window() {
-                                if let Some(sid) = w.side_chat_id.clone() {
-                                    let _ = self.side_chats.switch(&sid);
-                                } else {
-                                    // Focused main — clear side active so main input works
-                                    // (optional; SendPrompt checks window focus, but keep consistent)
-                                }
+                        if is_ctrl_tab || is_alt_tab {
+                            let backwards = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
+                                || key.code == KeyCode::BackTab;
+                            let moved = if backwards {
+                                self.side_panel.retreat_focus()
+                            } else {
+                                self.side_panel.advance_focus()
+                            };
+                            if let Some(sid) = moved {
+                                let _ = self.side_chats.switch(&sid);
+                            } else {
+                                self.side_panel.focused = false;
+                                self.side_chats.active_id = None;
                             }
-                            let _ = crate::views::window_manager::persist::save(&self.window_manager);
                             return InputOutcome::Changed;
                         }
-                        // Ctrl+←/→ or Alt+←/→ resize focused split by ±2 (Shift = ±10)
+                        // Ctrl+←/→ or Alt+←/→ resize the divider by ±2 (Shift = ±10).
                         let is_ctrl_left_right = matches!(key.code, KeyCode::Left | KeyCode::Right)
                             && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
                         let is_alt_left_right = matches!(key.code, KeyCode::Left | KeyCode::Right)
                             && key.modifiers.contains(crossterm::event::KeyModifiers::ALT);
-                        if (is_ctrl_left_right || is_alt_left_right)
-                            && !self.window_manager.splits.is_empty()
-                        {
+                        if is_ctrl_left_right || is_alt_left_right {
                             let shift = key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
-                            let base: i32 = if shift { 10 } else { 2 };
-                            let delta = if key.code == KeyCode::Left { -(base) } else { base };
-                            self.window_manager.resize_focused(delta);
-                            let _ = crate::views::window_manager::persist::save(&self.window_manager);
+                            let base: u16 = if shift { 10 } else { 2 };
+                            let delta = if key.code == KeyCode::Left { base } else { base.wrapping_neg() };
+                            let next = self.side_panel_preferences.main_ratio.saturating_sub(base);
+                            let prev = self.side_panel_preferences.main_ratio.saturating_add(base);
+                            self.side_panel_preferences.set_main_ratio(if key.code == KeyCode::Left {
+                                next
+                            } else {
+                                prev
+                            });
+                            let _ = delta;
+                            let _ = side_panel_persist::save(&self.side_panel_preferences);
                             return InputOutcome::Changed;
                         }
                     }
                 }
-                // When tiling is active, route input to the FOCUSED window's AgentView.
-                // Main stays at ActiveView::Agent(id); sides are looked up via window_manager focus.
-                let tiled_side_focused = (self.tiling_enabled || self.window_manager.tiling_enabled)
-                    && self
-                        .window_manager
-                        .focused_window()
-                        .is_some_and(|w| w.side_chat_id.is_some());
+                // When the side panel is focused, route input to the SELECTED tab's AgentView.
+                // Main stays at ActiveView::Agent(id); sides are looked up via side_panel focus.
+                let tiled_side_focused = self.side_panel.focused
+                    && self.side_panel.selected_id().is_some();
                 if tiled_side_focused {
                     // Resolve focused side AgentId
                     let focused_side_aid = self
-                        .window_manager
-                        .focused_window()
-                        .and_then(|w| w.side_chat_id.clone())
-                        .and_then(|sid| self.side_chats.get(&sid).and_then(|c| c.agent_id));
+                        .side_panel
+                        .selected_id()
+                        .and_then(|sid| self.side_chats.get(sid).and_then(|c| c.agent_id));
                     if let Some(sid) = focused_side_aid {
                         // Voice interim + minimal intercept still apply
                         if let Event::Key(key) = ev
@@ -5024,72 +5054,91 @@ impl AppView {
                         {
                             d.restore_peek_viewport(agents);
                         }
-                        // Remember area for accurate mouse drag hit-testing next frame.
-                        self.tiling_last_area = Some(view_area);
-                        // Tiling: side tiles are full AgentView clones (true copy of main chat system)
-                        // Keep focused side cursor/post to return instead of main when side focused
+                        // Side panel: tabs are full AgentView clones (true copy of main chat system).
+                        // Keep selected side cursor/post to return instead of main when side focused.
                         let mut tiled_side_cursor: Option<(u16, u16)> = None;
                         let mut tiled_side_post: Option<crate::terminal::overlay::PostFlush> = None;
                         let mut tiled_extra_posts: Vec<Option<crate::terminal::overlay::PostFlush>> = Vec::new();
-                        // Tiling draw path (behind flag): if enabled and >1 visible windows, render tiled boxes + minimized pills.
-                        // When tiled, each AgentView draws into its tile; single visible window falls back to normal layout (no regression).
-                        let tiled = self.tiling_enabled && self.window_manager.is_tiled();
-                        // Compute tiled rects once (used by both side-draw and main agent_area_eff below)
-                        let tiled_rects: Option<Vec<ratatui::layout::Rect>> = if tiled {
-                            Some(self.window_manager.compute_tiled_layout(view_area))
-                        } else { None };
-                        if tiled {
-                            let focused_id = self
-                                .window_manager
-                                .focused_window()
-                                .map(|w| w.id.clone());
-                            self.window_manager.draw_tiled_boxes(
-                                view_area,
-                                f.buffer_mut(),
-                                focused_id.as_deref(),
-                            );
-                            if self.window_manager.has_minimized() {
-                                self.window_manager
-                                    .draw_minimized_pills(view_area, f.buffer_mut());
-                            }
-                            // Side panes: FULL CLONE of main chat system — each side's AgentView draws into its tile.
-                            // Previous placeholder transcript has been removed: tiles are real AgentViews with full interaction.
-                            let rects_ref: &[ratatui::layout::Rect] = tiled_rects.as_deref().unwrap_or(&[]);
-                            let visible: Vec<_> = self
-                                .window_manager
-                                .visible_windows()
-                                .iter()
-                                .map(|w| (w.id.clone(), w.title.clone(), w.side_chat_id.clone()))
-                                .collect();
-                            // Hit rects for click-to-focus and archivable [X] (true clone keeps window chrome identical)
-                            self.side_window_hits.clear();
-                            self.side_tab_close_hits.clear();
-                            for (idx2, (win_id2, _title2, side_opt2)) in visible.iter().enumerate() {
-                                if idx2 >= rects_ref.len() { break; }
-                                let rr = rects_ref[idx2];
-                                self.side_window_hits.push((rr, win_id2.clone()));
-                                if let Some(sid) = side_opt2 {
-                                    if rr.width >= 5 {
-                                        let cr = ratatui::layout::Rect::new(rr.x + rr.width.saturating_sub(3), rr.y, 3, 1);
-                                        self.side_tab_close_hits.push((cr, sid.clone()));
+                        // Compute the persisted 65/35 (or user-adjusted) split once per frame.
+                        let panel_open = self.side_panel.is_open()
+                            && self.side_panel.selected_id().is_some();
+                        let split: Option<(ratatui::layout::Rect, ratatui::layout::Rect, ratatui::layout::Rect)> =
+                            if panel_open {
+                                self.side_panel_preferences.split(agent_area)
+                            } else {
+                                None
+                            };
+                        self.side_tab_hits.clear();
+                        if let Some((main_area, divider, side_area)) = split {
+                            // Remember geometry for next-frame input hit-testing.
+                            self.tiling_last_area = Some(view_area);
+                            self.side_panel_frame = SidePanelFrame {
+                                main: main_area,
+                                divider,
+                                panel: side_area,
+                            };
+                            // Draw the divider.
+                            {
+                                let theme = crate::theme::Theme::current();
+                                let focused = self.side_panel.focused;
+                                let style = if focused {
+                                    theme.fg(theme.accent_user)
+                                } else {
+                                    theme.fg(theme.gray_dim)
+                                };
+                                let glyph = crate::glyphs::accent_bar();
+                                let bg = if focused {
+                                    theme.bg_highlight
+                                } else {
+                                    theme.bg_base
+                                };
+                                for y in divider.y..divider.y + divider.height {
+                                    if let Some(cell) = f.buffer_mut().cell_mut((divider.x, y)) {
+                                        cell.set_char(glyph.chars().next().unwrap_or('│'));
+                                        cell.set_style(style);
+                                        cell.set_bg(bg);
                                     }
                                 }
                             }
-                            // Every side tiling is a FULL copy of the main chat system:
-                            // each side's AgentView draws into its tile's inner area (same draw() as main).
-                            let focused_win_id2 = focused_id.clone();
-                            let mut side_posts: Vec<Option<crate::terminal::overlay::PostFlush>> = Vec::new();
-                            for (idx, (win_id, _title, side_id_opt)) in visible.iter().enumerate().skip(1) {
-                                if idx >= rects_ref.len() { break; }
-                                let r = rects_ref[idx];
-                                if r.width < 10 || r.height < 6 { continue; }
-                                if let Some(side_id) = side_id_opt {
-                                    if let Some(sid) = self.side_chats.get(side_id).and_then(|c| c.agent_id) {
-                                        let inner = ratatui::widgets::Block::default()
-                                            .borders(ratatui::widgets::Borders::ALL)
-                                            .border_type(ratatui::widgets::BorderType::Rounded)
-                                            .inner(r);
-                                        if inner.width < 6 || inner.height < 4 { continue; }
+                            // Tab strip: allocate hitboxes from the same geometry that draws tabs.
+                            let tabs: Vec<(String, String)> = self
+                                .side_panel
+                                .open_tabs
+                                .iter()
+                                .filter_map(|sid| {
+                                    self.side_chats
+                                        .get(sid)
+                                        .map(|c| (sid.clone(), c.tab_label()))
+                                })
+                                .collect();
+                            let (hits, _overflow) = tab_hitboxes(side_area.x, side_area.width, tabs.clone());
+                            self.side_tab_hits = hits.clone();
+                            crate::views::side_panel::draw_tab_bar(
+                                f.buffer_mut(),
+                                side_area,
+                                &hits,
+                                &tabs,
+                                self.side_panel.selected_id(),
+                                self.side_panel.focused,
+                            );
+                            // Inner content area below the tab strip (footer line reserved).
+                            let content = ratatui::layout::Rect {
+                                x: side_area.x,
+                                y: side_area.y.saturating_add(SIDE_TAB_BAR_HEIGHT),
+                                width: side_area.width,
+                                height: side_area
+                                    .height
+                                    .saturating_sub(SIDE_TAB_BAR_HEIGHT)
+                                    .saturating_sub(1),
+                            };
+                            let side_id = self.side_panel.selected_id().map(str::to_owned);
+                            if let Some(sid) = side_id {
+                                if let Some(side_agent_id) = self
+                                    .side_chats
+                                    .get(&sid)
+                                    .and_then(|c| c.agent_id)
+                                {
+                                    if let Some(side_agent) = agents.get_mut(&side_agent_id) {
                                         let side_banner = crate::app::agent_view::BannerSlotParams {
                                             height: 0,
                                             announcements: &[],
@@ -5098,53 +5147,71 @@ impl AppView {
                                             mouse_pos: agent_mouse_pos,
                                             tip: None,
                                         };
-                                        if let Some(side_agent) = agents.get_mut(&sid) {
-                                            let is_focused = focused_win_id2.as_deref() == Some(win_id.as_str());
-                                            let (c, p) = side_agent.draw(
-                                                inner,
-                                                f.buffer_mut(),
-                                                registry,
-                                                scratch,
-                                                pending_hint,
-                                                false,
-                                                side_banner,
-                                                &self.bundle_state,
-                                                false,
-                                                false,
-                                                link_spans,
-                                                AppRenderParams {
-                                                    voice_available,
-                                                    voice_listening: false,
-                                                    voice_interim: None,
-                                                    esc_owned_before_agent: false,
-                                                },
-                                            );
-                                            if is_focused {
-                                                tiled_side_cursor = c;
-                                                tiled_side_post = p;
-                                            } else {
-                                                side_posts.push(p);
-                                            }
+                                        let (c, p) = side_agent.draw(
+                                            content,
+                                            f.buffer_mut(),
+                                            registry,
+                                            scratch,
+                                            pending_hint,
+                                            false,
+                                            side_banner,
+                                            &self.bundle_state,
+                                            false,
+                                            false,
+                                            link_spans,
+                                            AppRenderParams {
+                                                voice_available,
+                                                voice_listening: false,
+                                                voice_interim: None,
+                                                esc_owned_before_agent: false,
+                                            },
+                                        );
+                                        if self.side_panel.focused {
+                                            tiled_side_cursor = c;
+                                            tiled_side_post = p;
+                                        } else {
+                                            tiled_extra_posts.push(p);
                                         }
+                                    }
+                                } else {
+                                    // No AgentView yet — minimal placeholder.
+                                    let placeholder = "Restoring side…";
+                                    let style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
+                                    let truncated: String = placeholder.chars().take(content.width as usize).collect();
+                                    for (i, ch) in truncated.chars().enumerate() {
+                                        if let Some(cell) = f.buffer_mut().cell_mut((content.x + i as u16, content.y)) {
+                                            cell.set_char(ch);
+                                            cell.set_style(style);
+                                        }
+                                    }
+                                }
+                                // Subtle footer: relation to parent and workspace.
+                                if let Some(chat) = self.side_chats.get(&sid) {
+                                    let theme = crate::theme::Theme::current();
+                                    let workspace = if chat.workspace_id.is_empty() {
+                                        self.cwd.to_string_lossy().to_string()
                                     } else {
-                                        // No AgentView yet — fallback minimal placeholder (should not happen after CreateSideChat)
-                                        let inner = ratatui::widgets::Block::default()
-                                            .borders(ratatui::widgets::Borders::ALL)
-                                            .border_type(ratatui::widgets::BorderType::Rounded)
-                                            .inner(r);
-                                        let placeholder = format!("{} \u{2014} loading", _title);
-                                        let style = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
-                                        let truncated: String = placeholder.chars().take(inner.width as usize).collect();
-                                        for (i, ch) in truncated.chars().enumerate() {
-                                            if let Some(cell) = f.buffer_mut().cell_mut((inner.x + i as u16, inner.y)) {
-                                                cell.set_char(ch);
-                                                cell.set_style(style);
-                                            }
+                                        chat.workspace_id.clone()
+                                    };
+                                    let mut footer = format!("Side chat · parent {}", chat.parent_id);
+                                    if !workspace.is_empty() {
+                                        footer.push_str(&format!(" · {workspace}"));
+                                    }
+                                    let footer_y = side_area.y + side_area.height.saturating_sub(1);
+                                    let style = theme.fg(theme.gray_dim);
+                                    for (i, ch) in footer.chars().enumerate().take(content.width as usize) {
+                                        if let Some(cell) =
+                                            f.buffer_mut().cell_mut((content.x + i as u16, footer_y))
+                                        {
+                                            cell.set_char(ch);
+                                            cell.set_style(style);
                                         }
                                     }
                                 }
                             }
-                            tiled_extra_posts = side_posts;
+                        } else {
+                            // No visible panel: reset frame geometry so stale hits don't linger.
+                            self.side_panel_frame = SidePanelFrame::default();
                         }
                         if let Some(agent) = agents.get_mut(&id) {
                             let announcement_banner_h =
@@ -5167,12 +5234,9 @@ impl AppView {
                             } else {
                                 0
                             };
-                            let agent_area_eff = if tiled {
-                                // When tiled, main agent always occupies first tile (rect[0]); side panes are rendered separately above.
-                                // Focus only determines input routing (SendPrompt side_focused) and border highlight, not where main draws.
-                                // Bug fix: previous code used focused_idx (1 when side focused) which made main chat overwrite the side pane.
-                                let rects = self.window_manager.compute_tiled_layout(view_area);
-                                rects.first().copied().unwrap_or(agent_area)
+                            let agent_area_eff = if let Some((main_area, _, _)) = split {
+                                // When the panel is open, the parent always occupies the main column.
+                                main_area
                             } else {
                                 agent_area
                             };
@@ -5238,11 +5302,8 @@ impl AppView {
                             {
                                 link_spans.clear();
                             }
-                            let is_side_focused = tiled
-                                && self
-                                    .window_manager
-                                    .focused_window()
-                                    .is_some_and(|w| w.side_chat_id.is_some());
+                            let is_side_focused = self.side_panel.focused
+                                && self.side_panel.selected_id().is_some();
                             let effective_cursor = if is_side_focused {
                                 tiled_side_cursor.or(cursor_pos)
                             } else {

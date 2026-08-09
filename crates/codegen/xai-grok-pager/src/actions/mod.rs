@@ -84,6 +84,9 @@ pub enum ActionId {
     CopyBlockMeta,
     OpenBlockViewer,
 
+    // Side chat (Ask in Side Chat — Cursor-faithful, Ctrl+Shift+S)
+    AskInSideChat,
+
     // Link navigation
     OpenNextLink,
     OpenPrevLink,

@@ -1,8 +1,9 @@
-//! `/window` `/tile` `/tiling` — toggle tiled window layout.
+//! `/window` `/tile` `/tiling` — control the right-hand side panel.
 //!
-//! All three names map to the same command (aliases). Without args, toggles.
-//! With `on`/`off`/`enable`/`disable` (and `1`/`0`/`true`/`false`), sets explicitly.
-//! Persists via WindowManager persist (atomic write) in dispatch.
+//! All three names map to the same command (aliases). Without args, toggles
+//! the panel (show/hide when tabs exist). `on`/`off` show or hide explicitly.
+//! `reset-size` restores the default 65/35 split. Persists the ratio via the
+//! side-panel preferences (atomic write in dispatch).
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -15,15 +16,15 @@ impl SlashCommand for TilingCommand {
     }
 
     fn aliases(&self) -> &[&str] {
-        &["tile", "tiling", "windows"]
+        &["tile", "tiling", "windows", "panel"]
     }
 
     fn description(&self) -> &str {
-        "Toggle tiled window layout (or /window on|off)"
+        "Control the side panel: /window [on|off|reset-size]"
     }
 
     fn usage(&self) -> &str {
-        "/window [on|off]"
+        "/window [on|off|reset-size]"
     }
 
     fn takes_args(&self) -> bool {
@@ -36,14 +37,18 @@ impl SlashCommand for TilingCommand {
             return CommandResult::Action(Action::ToggleTiling);
         }
         match trimmed.as_str() {
-            "on" | "enable" | "enabled" | "1" | "true" | "yes" => {
+            "on" | "enable" | "enabled" | "1" | "true" | "yes" | "show" => {
                 CommandResult::Action(Action::SetTiling(true))
             }
-            "off" | "disable" | "disabled" | "0" | "false" | "no" => {
+            "off" | "disable" | "disabled" | "0" | "false" | "no" | "hide" => {
                 CommandResult::Action(Action::SetTiling(false))
             }
+            "reset" | "reset-size" | "reset-ratio" | "65" => {
+                CommandResult::Action(Action::SetTilingReset)
+            }
             _ => CommandResult::Message(
-                "Usage: /window [on|off] — toggle tiled layout. Also: /tile, /tiling".to_string(),
+                "Usage: /window [on|off|reset-size] — control the side panel. Also: /tile, /tiling"
+                    .to_string(),
             ),
         }
     }
@@ -90,6 +95,12 @@ mod tests {
         assert!(matches!(cmd.run(&mut c, "off"), CommandResult::Action(Action::SetTiling(false))));
         assert!(matches!(cmd.run(&mut c, "enable"), CommandResult::Action(Action::SetTiling(true))));
         assert!(matches!(cmd.run(&mut c, "disable"), CommandResult::Action(Action::SetTiling(false))));
+        assert!(matches!(cmd.run(&mut c, "show"), CommandResult::Action(Action::SetTiling(true))));
+        assert!(matches!(cmd.run(&mut c, "hide"), CommandResult::Action(Action::SetTiling(false))));
+        assert!(matches!(
+            cmd.run(&mut c, "reset-size"),
+            CommandResult::Action(Action::SetTilingReset)
+        ));
     }
 
     #[test]
@@ -99,5 +110,6 @@ mod tests {
         assert_eq!(reg.get("tile").unwrap().name(), "window");
         assert_eq!(reg.get("tiling").unwrap().name(), "window");
         assert_eq!(reg.get("windows").unwrap().name(), "window");
+        assert_eq!(reg.get("panel").unwrap().name(), "window");
     }
 }

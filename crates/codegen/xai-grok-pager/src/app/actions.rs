@@ -350,6 +350,8 @@ pub enum Action {
     CopyBlockMeta,
     /// Open the selected block in the fullscreen viewer.
     OpenBlockViewer,
+    /// Populate a side chat with the selected block's content (Ctrl+Shift+S).
+    AskInSideChat,
     /// Open the extensions modal dialog on a specific tab.
     OpenExtensionsModal {
         tab: crate::views::extensions_modal::ExtensionsTab,
@@ -738,6 +740,8 @@ pub enum Action {
     ToggleTiling,
     /// Enable or disable tiling explicitly.
     SetTiling(bool),
+    /// Reset the side-panel divider back to the default 65/35 split.
+    SetTilingReset,
     /// Request a session recap ("where was I" summary). `auto` is `true` for
     /// the automatic return-from-away recap, `false` for an explicit `/recap`.
     /// Bypasses the prompt queue (works while the agent is busy).

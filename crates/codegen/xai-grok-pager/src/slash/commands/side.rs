@@ -1,9 +1,6 @@
 //! `/side` — durable side chats (Cursor-faithful).
 //!
-//! `/side` creates a `SideChat` via `Action::CreateSideChat` (parent_id +
-//! prompt) and `Action::ListSideChats` / switch / close + transcript
-//! follow-ups. Wired to `WindowManager` when `tiling_enabled` (docked right
-//! 65|35) or as overlay when not. Also honors `btw` alias later.
+//! `/side` creates a durable conversation in the right-hand side panel.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -25,11 +22,11 @@ impl SlashCommand for SideCommand {
     }
 
     fn description(&self) -> &str {
-        "Open a durable side chat — /side list/switch/close"
+        "Open a durable side chat — /side [question]"
     }
 
     fn usage(&self) -> &str {
-        "/side [question]|switch <id>|close <id>|list"
+        "/side [question]"
     }
 
     fn takes_args(&self) -> bool {
@@ -41,7 +38,7 @@ impl SlashCommand for SideCommand {
     }
 
     fn arg_placeholder(&self) -> Option<&str> {
-        Some("[question]|[switch|close] <id>")
+        Some("[question]")
     }
 
     fn session_scoped(&self) -> bool {
@@ -57,26 +54,10 @@ impl SlashCommand for SideCommand {
                 prompt: String::new(),
             });
         }
-        // Subcommands within `/side ...`
-        let lower = trimmed.to_ascii_lowercase();
-        if lower == "list" || lower == "ls" {
-            return CommandResult::Action(Action::ListSideChats);
-        }
-        if lower.strip_prefix("switch ").is_some() {
-            let id = trimmed[7..].trim();
-            if id.is_empty() {
-                return CommandResult::Message("Usage: /side switch <id>".to_string());
-            }
-            return CommandResult::Action(Action::SwitchSideChat { id: id.to_string() });
-        }
-        if lower.strip_prefix("close ").is_some() {
-            let id = trimmed[6..].trim();
-            if id.is_empty() {
-                return CommandResult::Message("Usage: /side close <id>".to_string());
-            }
-            return CommandResult::Action(Action::CloseSideChat { id: id.to_string() });
-        }
-        // Otherwise treat as initial question / follow-up if active side chat exists is handled in dispatch.
+        // The rest of the line is always the initial prompt.  Management is
+        // intentionally kept in `/sides` and visible tab chrome so ordinary
+        // natural-language questions such as "close a file" are not parsed as
+        // accidental command subcommands.
         CommandResult::Action(Action::CreateSideChat {
             parent_id: String::new(),
             prompt: trimmed.to_string(),

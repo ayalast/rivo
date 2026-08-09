@@ -2084,6 +2084,7 @@ fn resolve_action(action_id: Option<ActionId>) -> Option<InputOutcome> {
         ActionId::CopyBlockContent => Action::CopyBlockContent,
         ActionId::CopyBlockMeta => Action::CopyBlockMeta,
         ActionId::OpenBlockViewer => Action::OpenBlockViewer,
+        ActionId::AskInSideChat => Action::AskInSideChat,
         ActionId::OpenNextLink => Action::OpenNextLink,
         ActionId::OpenPrevLink => Action::OpenPrevLink,
         ActionId::FocusPrompt => Action::FocusPrompt,

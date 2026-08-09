@@ -24,6 +24,9 @@ pub struct SideChat {
     pub id: SideChatId,
     /// Owning parent agent id (stringified `AgentId` or `SessionId`).
     pub parent_id: String,
+    /// Workspace identity at creation. Side lookup never crosses this boundary.
+    #[serde(default)]
+    pub workspace_id: String,
     /// Hidden parent history copied at creation time (model-only, not rendered).
     #[serde(default)]
     pub parent_snapshot: Vec<acp::ContentBlock>,
@@ -84,6 +87,7 @@ impl SideChat {
         Self {
             id,
             parent_id: parent_id.into(),
+            workspace_id: String::new(),
             parent_snapshot: Vec::new(),
             session_id,
             transcript,
@@ -107,6 +111,11 @@ impl SideChat {
         let mut chat = Self::new(parent_id, prompt);
         chat.parent_snapshot = parent_snapshot;
         chat
+    }
+
+    /// Attach an explicit workspace identity to this durable record.
+    pub fn set_workspace_id(&mut self, workspace_id: impl Into<String>) {
+        self.workspace_id = workspace_id.into();
     }
 
     /// Whether this side chat can create a nested side chat (always false — not nestable).
@@ -143,14 +152,34 @@ impl SideChat {
         }
     }
 
+    /// User-visible tab label, without exposing a generated identifier.
+    pub fn tab_label(&self) -> String {
+        if self.label.trim().is_empty() {
+            "New Side Chat".to_string()
+        } else {
+            self.label.clone()
+        }
+    }
+
     /// Set the friendly label.
     pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = label.into();
     }
 
-    /// Compute next label for a store: "Side N" where N = store.len() + 1.
-    pub fn next_label(store: &SideChatStore) -> String {
-        format!("Side {}", store.chats.len() + 1)
+    /// Derive a local tab title from the first prompt, safely truncated.
+    pub fn label_from_prompt(prompt: &str) -> String {
+        const MAX_CHARS: usize = 28;
+        let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.is_empty() {
+            return "New Side Chat".to_string();
+        }
+        let mut chars = collapsed.chars();
+        let prefix: String = chars.by_ref().take(MAX_CHARS).collect();
+        if chars.next().is_some() {
+            format!("{prefix}…")
+        } else {
+            prefix
+        }
     }
 }
 
@@ -160,19 +189,14 @@ impl SideChatStore {
         Self::default()
     }
 
-    /// Next friendly label for a new chat: "Side N" where N = len+1.
-    pub fn next_label(&self) -> String {
-        SideChat::next_label(self)
-    }
-
     /// Create a new side chat attached to `parent_id` with optional initial `prompt`.
     ///
     /// Mirrors `SideChat::new` but inserts into the store and returns a clone
     /// of the created chat (so callers can read `id` without borrowing).
-    /// Assigns `label` as "Side N" where N = chats.len()+1.
+    /// Uses a local visible label; the generated id remains internal.
     pub fn create_side(&mut self, parent_id: impl Into<String>, prompt: Option<String>) -> SideChat {
-        let mut chat = SideChat::new(parent_id, prompt);
-        chat.label = self.next_label();
+        let mut chat = SideChat::new(parent_id, prompt.clone());
+        chat.label = SideChat::label_from_prompt(prompt.as_deref().unwrap_or_default());
         let cloned = chat.clone();
         self.chats.push(chat);
         self.active_id = Some(cloned.id.clone());
@@ -180,15 +204,15 @@ impl SideChatStore {
     }
 
     /// Create with hidden parent snapshot (Cursor-faithful hidden context).
-    /// Assigns `label` as "Side N" where N = chats.len()+1.
+    /// Uses a local visible label; the generated id remains internal.
     pub fn create_side_with_snapshot(
         &mut self,
         parent_id: impl Into<String>,
         parent_snapshot: Vec<acp::ContentBlock>,
         prompt: Option<String>,
     ) -> SideChat {
-        let mut chat = SideChat::with_snapshot(parent_id, parent_snapshot, prompt);
-        chat.label = self.next_label();
+        let mut chat = SideChat::with_snapshot(parent_id, parent_snapshot, prompt.clone());
+        chat.label = SideChat::label_from_prompt(prompt.as_deref().unwrap_or_default());
         let cloned = chat.clone();
         self.chats.push(chat);
         self.active_id = Some(cloned.id.clone());
@@ -208,6 +232,18 @@ impl SideChatStore {
     /// List only archived chats.
     pub fn list_archived(&self) -> Vec<&SideChat> {
         self.chats.iter().filter(|c| c.archived).collect()
+    }
+
+    /// Active conversations belonging to one parent/workspace pair.
+    pub fn list_active_for(&self, parent_id: &str, workspace_id: &str) -> Vec<&SideChat> {
+        self.chats
+            .iter()
+            .filter(|chat| {
+                !chat.archived
+                    && chat.parent_id == parent_id
+                    && (chat.workspace_id.is_empty() || chat.workspace_id == workspace_id)
+            })
+            .collect()
     }
 
     /// Switch active side chat to `id`. Returns `true` if found.
@@ -243,6 +279,16 @@ impl SideChatStore {
     /// Get mutable side chat by id.
     pub fn get_mut(&mut self, id: &str) -> Option<&mut SideChat> {
         self.chats.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Update a chat title only when its first meaningful prompt arrives.
+    pub fn set_label_from_first_prompt(&mut self, id: &str, prompt: &str) {
+        let Some(chat) = self.get_mut(id) else {
+            return;
+        };
+        if chat.label == "New Side Chat" && !prompt.trim().is_empty() {
+            chat.label = SideChat::label_from_prompt(prompt);
+        }
     }
 
     /// Close (archive) a side chat. `X` archives, not deletes.
@@ -298,6 +344,33 @@ mod tests {
         assert_eq!(chat.parent_id, "parent-1");
         assert_eq!(store.len(), 1);
         assert_eq!(store.active().unwrap().id, chat.id);
+    }
+
+    #[test]
+    fn empty_side_uses_new_side_chat_label() {
+        let mut store = SideChatStore::new();
+        let chat = store.create_side("parent-1", None);
+        assert_eq!(chat.tab_label(), "New Side Chat");
+    }
+
+    #[test]
+    fn prompt_becomes_local_truncated_label() {
+        let mut store = SideChatStore::new();
+        let chat = store.create_side(
+            "parent-1",
+            Some("Explain exactly how this very long architecture should work".to_string()),
+        );
+        assert_eq!(chat.tab_label(), "Explain exactly how this very…");
+    }
+
+    #[test]
+    fn active_list_is_scoped_to_parent_and_workspace() {
+        let mut store = SideChatStore::new();
+        let first = store.create_side("parent-1", None);
+        let second = store.create_side("parent-2", None);
+        store.get_mut(&first.id).unwrap().set_workspace_id("C:/one");
+        store.get_mut(&second.id).unwrap().set_workspace_id("C:/one");
+        assert_eq!(store.list_active_for("parent-1", "C:/one").len(), 1);
     }
 
     #[test]
